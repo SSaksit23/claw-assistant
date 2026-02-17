@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Environment / secrets
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+logs/
+*.log
+
+# Data (runtime outputs, uploads)
+data/uploads/
+data/itineraries/
+data/parsed_*.json
+data/results_*.json
+data/aggregated_data.json
+
+# Node (if any frontend tooling)
+node_modules/
+
+# Playwright
+playwright-report/
+test-results/

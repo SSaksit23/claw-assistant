@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Web365 ClawBot - Multi-Agent Chat</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/11.1.1/marked.min.js"></script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/chat.css') }}">
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        primary: { 50:'#eff6ff',100:'#dbeafe',200:'#bfdbfe',300:'#93c5fd',400:'#60a5fa',500:'#3b82f6',600:'#2563eb',700:'#1d4ed8',800:'#1e40af',900:'#1e3a8a' },
+                        dark: { 800:'#1e1e2e',900:'#11111b',700:'#313244',600:'#45475a' }
+                    }
+                }
+            }
+        }
+    </script>
+</head>
+<body class="dark bg-dark-900 text-gray-100 h-screen flex overflow-hidden">
+
+    <!-- Sidebar: Agent Status Panel -->
+    <aside id="sidebar" class="w-72 bg-dark-800 border-r border-dark-700 flex flex-col transition-all duration-300 hidden lg:flex">
+        <!-- Logo -->
+        <div class="p-5 border-b border-dark-700">
+            <div class="flex items-center gap-3">
+                <div class="w-10 h-10 rounded-xl bg-primary-600 flex items-center justify-center font-bold text-lg">C</div>
+                <div>
+                    <h1 class="font-bold text-lg leading-tight">ClawBot</h1>
+                    <p class="text-xs text-gray-400">Multi-Agent System</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Agent Status List -->
+        <div class="flex-1 overflow-y-auto p-4 space-y-3">
+            <h2 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Agent Status</h2>
+
+            <div class="agent-card" data-agent="assignment">
+                <div class="flex items-center gap-3">
+                    <div class="status-dot idle"></div>
+                    <div>
+                        <p class="text-sm font-medium">Assignment Agent</p>
+                        <p class="text-xs text-gray-400 agent-status-text">Idle</p>
+                    </div>
+                </div>
+            </div>
+            <div class="agent-card" data-agent="accounting">
+                <div class="flex items-center gap-3">
+                    <div class="status-dot idle"></div>
+                    <div>
+                        <p class="text-sm font-medium">Accounting Agent</p>
+                        <p class="text-xs text-gray-400 agent-status-text">Idle</p>
+                    </div>
+                </div>
+            </div>
+            <div class="agent-card" data-agent="data_analysis">
+                <div class="flex items-center gap-3">
+                    <div class="status-dot idle"></div>
+                    <div>
+                        <p class="text-sm font-medium">Data Analysis Agent</p>
+                        <p class="text-xs text-gray-400 agent-status-text">Idle</p>
+                    </div>
+                </div>
+            </div>
+            <div class="agent-card" data-agent="market_analysis">
+                <div class="flex items-center gap-3">
+                    <div class="status-dot idle"></div>
+                    <div>
+                        <p class="text-sm font-medium">Market Analysis Agent</p>
+                        <p class="text-xs text-gray-400 agent-status-text">Idle</p>
+                    </div>
+                </div>
+            </div>
+            <div class="agent-card" data-agent="admin">
+                <div class="flex items-center gap-3">
+                    <div class="status-dot idle"></div>
+                    <div>
+                        <p class="text-sm font-medium">Admin Agent</p>
+                        <p class="text-xs text-gray-400 agent-status-text">Idle</p>
+                    </div>
+                </div>
+            </div>
+            <div class="agent-card" data-agent="executive">
+                <div class="flex items-center gap-3">
+                    <div class="status-dot idle"></div>
+                    <div>
+                        <p class="text-sm font-medium">Executive Agent</p>
+                        <p class="text-xs text-gray-400 agent-status-text">Idle</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Quick Actions -->
+        <div class="p-4 border-t border-dark-700 space-y-2">
+            <h2 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Quick Actions</h2>
+            <button onclick="document.getElementById('fileInput').click()" class="quick-action-btn">Upload Expense File</button>
+            <button onclick="sendQuickAction('help')" class="quick-action-btn">Show Help</button>
+            <button onclick="sendQuickAction('status')" class="quick-action-btn">Check Job Status</button>
+        </div>
+
+        <!-- API Info -->
+        <div class="p-4 border-t border-dark-700">
+            <h2 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">REST API</h2>
+            <p class="text-xs text-gray-500">n8n endpoints:</p>
+            <p class="text-xs text-gray-400 font-mono mt-1">POST /api/expenses</p>
+            <p class="text-xs text-gray-400 font-mono">POST /api/parse</p>
+            <p class="text-xs text-gray-400 font-mono">GET /api/packages</p>
+        </div>
+    </aside>
+
+    <!-- Main Chat Area -->
+    <main class="flex-1 flex flex-col min-w-0">
+        <!-- Top Bar -->
+        <header class="h-16 bg-dark-800 border-b border-dark-700 flex items-center px-5 gap-4 shrink-0">
+            <button id="sidebarToggle" class="lg:hidden p-2 hover:bg-dark-700 rounded-lg transition-colors">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/>
+                </svg>
+            </button>
+            <div class="flex-1">
+                <h2 class="font-semibold">Web365 ClawBot Chat</h2>
+                <p class="text-xs text-gray-400" id="connectionStatus">Connecting...</p>
+            </div>
+            <button id="themeToggle" class="p-2 hover:bg-dark-700 rounded-lg transition-colors" title="Toggle theme">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"/>
+                </svg>
+            </button>
+        </header>
+
+        <!-- Messages Container -->
+        <div id="chatMessages" class="flex-1 overflow-y-auto p-5 space-y-4">
+            <!-- Welcome message -->
+            <div class="flex gap-3 max-w-3xl mx-auto">
+                <div class="w-8 h-8 rounded-lg bg-primary-600 flex items-center justify-center shrink-0 text-sm font-bold">C</div>
+                <div class="message-bubble agent">
+                    <p class="font-semibold text-primary-400 text-sm mb-1">ClawBot</p>
+                    <div class="prose prose-invert prose-sm">
+                        <p>Welcome to <strong>Web365 ClawBot</strong> -- automated expense recording for qualityb2bpackage.com.</p>
+                        <p><strong>How it works:</strong></p>
+                        <ol>
+                            <li>Upload your expense file (CSV, Excel, PDF, or DOCX)</li>
+                            <li>I'll parse and extract: group code, travel date, size, price</li>
+                            <li>Each record is submitted to the website automatically</li>
+                            <li>You get the order numbers back as confirmation</li>
+                        </ol>
+                        <p>Click the <strong>paperclip icon</strong> or drag a file to get started.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- File Upload Drop Zone (hidden by default) -->
+        <div id="dropZone" class="hidden mx-5 mb-2 p-6 border-2 border-dashed border-primary-500 rounded-xl bg-primary-500/10 text-center transition-all">
+            <p class="text-primary-400 font-medium">Drop your file here</p>
+            <p class="text-xs text-gray-400 mt-1">CSV, Excel, PDF, or DOCX</p>
+        </div>
+
+        <!-- Uploaded File Indicator -->
+        <div id="fileIndicator" class="hidden mx-5 mb-2">
+            <div class="inline-flex items-center gap-2 bg-dark-700 rounded-lg px-3 py-2 text-sm">
+                <svg class="w-4 h-4 text-primary-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+                </svg>
+                <span id="fileName" class="text-gray-300"></span>
+                <button onclick="clearFile()" class="text-gray-400 hover:text-red-400 transition-colors">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+                    </svg>
+                </button>
+            </div>
+        </div>
+
+        <!-- Input Area -->
+        <div class="p-4 bg-dark-800 border-t border-dark-700 shrink-0">
+            <div class="max-w-3xl mx-auto flex gap-3 items-end">
+                <!-- File Upload Button -->
+                <label class="p-3 hover:bg-dark-700 rounded-xl cursor-pointer transition-colors shrink-0" title="Upload file">
+                    <input type="file" id="fileInput" class="hidden" accept=".csv,.xlsx,.xls,.pdf,.docx">
+                    <svg class="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13"/>
+                    </svg>
+                </label>
+
+                <!-- Text Input -->
+                <div class="flex-1 relative">
+                    <textarea
+                        id="messageInput"
+                        rows="1"
+                        placeholder="Type your message..."
+                        class="w-full bg-dark-700 border border-dark-600 rounded-xl px-4 py-3 pr-12 text-gray-100 placeholder-gray-500 resize-none focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-all"
+                        style="max-height: 150px;"
+                    ></textarea>
+                </div>
+
+                <!-- Send Button -->
+                <button id="sendBtn" onclick="sendMessage()" class="p-3 bg-primary-600 hover:bg-primary-700 rounded-xl transition-colors shrink-0 disabled:opacity-50 disabled:cursor-not-allowed" title="Send message">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"/>
+                    </svg>
+                </button>
+            </div>
+            <p class="text-center text-xs text-gray-500 mt-2">Web365 ClawBot &mdash; Multi-Agent System for Quality B2B Package</p>
+        </div>
+    </main>
+
+    <script src="{{ url_for('static', filename='js/chat.js') }}"></script>
+</body>
+</html>

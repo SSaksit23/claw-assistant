@@ -1,0 +1,20 @@
+{
+  "name": "MarketAnalysisAgentMCP",
+  "description": "MCP for Market Analysis Agent to interact with QualityB2BPackage website",
+  "tools": [
+    {
+      "name": "get_travel_packages",
+      "description": "Retrieves travel package data from the /travelpackage endpoint",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "website": { "type": "string", "description": "Filter by website" },
+          "country": { "type": "string", "description": "Filter by country" },
+          "city": { "type": "string", "description": "Filter by city" },
+          "keyword": { "type": "string", "description": "Search by keyword (program name or tour code)" }
+        },
+        "required": []
+      }
+    }
+  ]
+}

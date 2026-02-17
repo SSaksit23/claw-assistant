@@ -1,0 +1,40 @@
+{
+  "name": "DataAnalysisAgentMCP",
+  "description": "MCP for Data Analysis Agent to interact with QualityB2BPackage website",
+  "tools": [
+    {
+      "name": "get_booking_data",
+      "description": "Retrieves booking data from the /booking endpoint",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "program_owner": { "type": "string", "description": "Filter by program owner" },
+          "booking_status": { "type": "string", "description": "Filter by booking status" },
+          "airline": { "type": "string", "description": "Filter by airline" },
+          "country": { "type": "string", "description": "Filter by country" },
+          "tour_code": { "type": "string", "description": "Filter by tour code" },
+          "booking_date_from": { "type": "string", "description": "Booking date from (YYYY-MM-DD)" },
+          "booking_date_to": { "type": "string", "description": "Booking date to (YYYY-MM-DD)" },
+          "travel_date_from": { "type": "string", "description": "Travel date from (YYYY-MM-DD)" },
+          "travel_date_to": { "type": "string", "description": "Travel date to (YYYY-MM-DD)" }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "get_report_data",
+      "description": "Retrieves report data from the /report/report_seller endpoint",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "report_type": { "type": "string", "description": "Type of report (tour, group, package, famtrip)" },
+          "report_format": { "type": "string", "description": "Format of the report (summary or detailed)" },
+          "breakdown_by": { "type": "string", "description": "Field to break down the report by" },
+          "country": { "type": "string", "description": "Filter by country" },
+          "province": { "type": "string", "description": "Filter by province" }
+        },
+        "required": ["report_type", "report_format"]
+      }
+    }
+  ]
+}

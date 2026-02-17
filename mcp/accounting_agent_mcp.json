@@ -1,0 +1,23 @@
+{
+  "name": "AccountingAgentMCP",
+  "description": "MCP for Accounting Agent to interact with QualityB2BPackage website",
+  "tools": [
+    {
+      "name": "create_charge",
+      "description": "Creates a new charge in the /charges_group/create endpoint",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "tour_code": { "type": "string", "description": "Tour code for the charge" },
+          "charge_type": { "type": "string", "description": "Type of charge (e.g., flight, visa)" },
+          "description": { "type": "string", "description": "Description of the charge" },
+          "charge_date": { "type": "string", "description": "Date of the charge (YYYY-MM-DD)" },
+          "amount": { "type": "number", "description": "Amount of the charge" },
+          "currency": { "type": "string", "description": "Currency of the charge" },
+          "remark": { "type": "string", "description": "Additional remarks" }
+        },
+        "required": ["tour_code", "charge_type", "description", "charge_date", "amount", "currency"]
+      }
+    }
+  ]
+}

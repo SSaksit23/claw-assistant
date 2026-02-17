@@ -1,0 +1,734 @@
+{
+  "mcp_version": "1.0.0",
+  "name": "Quality B2B Package Web Integration",
+  "description": "MCP configuration for multi-agent system to interact with Quality B2B Package website",
+  "base_url": "https://www.qualityb2bpackage.com",
+  "authentication": {
+    "type": "session_based",
+    "session_management": "cookie_persistence",
+    "login_url": "/login",
+    "logout_url": "/logout"
+  },
+  "agents": {
+    "assignment_agent": {
+      "name": "Assignment Agent",
+      "description": "Receives user input, processes files, defines tasks, and assigns work to specialized agents",
+      "endpoints": [],
+      "capabilities": [
+        "file_processing",
+        "task_definition",
+        "task_planning",
+        "agent_assignment",
+        "input_validation"
+      ],
+      "supported_file_types": [
+        "pdf",
+        "docx",
+        "xlsx",
+        "csv"
+      ]
+    },
+    "accounting_agent": {
+      "name": "Accounting Agent",
+      "description": "Handles financial recording, expense order creation, and accounting operations",
+      "endpoints": [
+        {
+          "name": "list_expenses",
+          "method": "GET",
+          "url": "/charges_group",
+          "description": "Retrieve list of group tour expenses",
+          "response_format": "html_table",
+          "data_fields": [
+            "program_name",
+            "team_id",
+            "country",
+            "office",
+            "payment_date",
+            "amount",
+            "currency",
+            "created_date",
+            "edited_date"
+          ]
+        },
+        {
+          "name": "create_expense",
+          "method": "POST",
+          "url": "/charges_group/create",
+          "description": "Create new expense record",
+          "form_fields": [
+            {
+              "name": "program_date_from",
+              "type": "date",
+              "required": true,
+              "description": "Program start date"
+            },
+            {
+              "name": "program_date_to",
+              "type": "date",
+              "required": true,
+              "description": "Program end date"
+            },
+            {
+              "name": "program_id",
+              "type": "dropdown",
+              "required": true,
+              "description": "Travel program selection"
+            },
+            {
+              "name": "tour_code",
+              "type": "dropdown",
+              "required": true,
+              "description": "Tour code selection"
+            },
+            {
+              "name": "payment_date",
+              "type": "date",
+              "required": true,
+              "description": "Payment date"
+            },
+            {
+              "name": "payment_time",
+              "type": "time",
+              "required": false,
+              "description": "Payment time"
+            },
+            {
+              "name": "receipt_date",
+              "type": "date",
+              "required": true,
+              "description": "Receipt date"
+            },
+            {
+              "name": "receipt_number",
+              "type": "text",
+              "required": true,
+              "description": "Receipt or invoice number"
+            },
+            {
+              "name": "expense_rows",
+              "type": "dynamic_array",
+              "required": true,
+              "description": "Array of expense items",
+              "fields": [
+                {
+                  "name": "description",
+                  "type": "text",
+                  "required": true
+                },
+                {
+                  "name": "type",
+                  "type": "dropdown",
+                  "required": true,
+                  "options": [
+                    "flight_ticket",
+                    "visa",
+                    "meal_allowance",
+                    "taxi",
+                    "accommodation",
+                    "tour_guide",
+                    "other"
+                  ]
+                },
+                {
+                  "name": "amount",
+                  "type": "number",
+                  "required": true
+                },
+                {
+                  "name": "currency",
+                  "type": "dropdown",
+                  "required": true,
+                  "options": [
+                    "THB",
+                    "USD",
+                    "EUR",
+                    "GBP",
+                    "JPY",
+                    "CNY",
+                    "SGD",
+                    "MYR"
+                  ]
+                },
+                {
+                  "name": "exchange_rate",
+                  "type": "number",
+                  "required": false,
+                  "default": 1
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "get_expense_detail",
+          "method": "GET",
+          "url": "/charges_group/{expense_id}",
+          "description": "Retrieve detailed expense information",
+          "parameters": [
+            {
+              "name": "expense_id",
+              "type": "string",
+              "required": true
+            }
+          ]
+        },
+        {
+          "name": "update_expense",
+          "method": "PUT",
+          "url": "/charges_group/{expense_id}",
+          "description": "Update existing expense record",
+          "parameters": [
+            {
+              "name": "expense_id",
+              "type": "string",
+              "required": true
+            }
+          ]
+        },
+        {
+          "name": "delete_expense",
+          "method": "DELETE",
+          "url": "/charges_group/{expense_id}",
+          "description": "Delete expense record",
+          "parameters": [
+            {
+              "name": "expense_id",
+              "type": "string",
+              "required": true
+            }
+          ]
+        }
+      ],
+      "capabilities": [
+        "expense_recording",
+        "expense_order_creation",
+        "financial_calculation",
+        "currency_conversion",
+        "receipt_management",
+        "data_storage"
+      ]
+    },
+    "data_analysis_agent": {
+      "name": "Data Analysis Agent",
+      "description": "Retrieves and analyzes data from reports and booking sections",
+      "endpoints": [
+        {
+          "name": "get_booking_list",
+          "method": "GET",
+          "url": "/booking",
+          "description": "Retrieve all bookings",
+          "query_parameters": [
+            {
+              "name": "page",
+              "type": "integer",
+              "required": false
+            },
+            {
+              "name": "limit",
+              "type": "integer",
+              "required": false
+            },
+            {
+              "name": "status",
+              "type": "string",
+              "required": false
+            }
+          ],
+          "response_format": "html_table"
+        },
+        {
+          "name": "get_booking_detail",
+          "method": "GET",
+          "url": "/booking/{booking_id}",
+          "description": "Retrieve detailed booking information",
+          "parameters": [
+            {
+              "name": "booking_id",
+              "type": "string",
+              "required": true
+            }
+          ]
+        },
+        {
+          "name": "get_seller_report",
+          "method": "GET",
+          "url": "/report/report_seller",
+          "description": "Retrieve seller sales report",
+          "query_parameters": [
+            {
+              "name": "report_type",
+              "type": "string",
+              "required": false,
+              "options": [
+                "tour",
+                "group_tour",
+                "package",
+                "famtrip"
+              ]
+            },
+            {
+              "name": "website_id",
+              "type": "string",
+              "required": false
+            },
+            {
+              "name": "country",
+              "type": "string",
+              "required": false
+            },
+            {
+              "name": "province",
+              "type": "string",
+              "required": false
+            },
+            {
+              "name": "continent",
+              "type": "string",
+              "required": false
+            },
+            {
+              "name": "report_format",
+              "type": "string",
+              "required": false,
+              "options": [
+                "summary",
+                "detailed"
+              ]
+            }
+          ],
+          "response_format": "html_table"
+        },
+        {
+          "name": "get_invoice_report",
+          "method": "GET",
+          "url": "/report/invoice",
+          "description": "Retrieve invoice reports",
+          "query_parameters": [
+            {
+              "name": "date_from",
+              "type": "date",
+              "required": false
+            },
+            {
+              "name": "date_to",
+              "type": "date",
+              "required": false
+            }
+          ]
+        },
+        {
+          "name": "get_payment_report",
+          "method": "GET",
+          "url": "/report/payment",
+          "description": "Retrieve payment reports",
+          "query_parameters": [
+            {
+              "name": "date_from",
+              "type": "date",
+              "required": false
+            },
+            {
+              "name": "date_to",
+              "type": "date",
+              "required": false
+            }
+          ]
+        }
+      ],
+      "capabilities": [
+        "data_retrieval",
+        "report_generation",
+        "data_analysis",
+        "trend_analysis",
+        "statistical_analysis",
+        "data_visualization"
+      ]
+    },
+    "market_analysis_agent": {
+      "name": "Market Analysis Agent",
+      "description": "Gathers market information and analyzes travel packages and competitive landscape",
+      "endpoints": [
+        {
+          "name": "list_travel_packages",
+          "method": "GET",
+          "url": "/travelpackage",
+          "description": "Retrieve list of travel packages",
+          "query_parameters": [
+            {
+              "name": "website",
+              "type": "string",
+              "required": false
+            },
+            {
+              "name": "country",
+              "type": "string",
+              "required": false
+            },
+            {
+              "name": "city",
+              "type": "string",
+              "required": false
+            },
+            {
+              "name": "keyword",
+              "type": "string",
+              "required": false,
+              "description": "Search by program name or tour code"
+            },
+            {
+              "name": "product_type",
+              "type": "string",
+              "required": false
+            },
+            {
+              "name": "category",
+              "type": "string",
+              "required": false
+            }
+          ],
+          "response_format": "html_table",
+          "data_fields": [
+            "package_id",
+            "package_name",
+            "tour_code",
+            "country",
+            "package_type",
+            "price",
+            "duration",
+            "created_date",
+            "edited_date"
+          ]
+        },
+        {
+          "name": "get_package_detail",
+          "method": "GET",
+          "url": "/travelpackage/{package_id}",
+          "description": "Retrieve detailed package information",
+          "parameters": [
+            {
+              "name": "package_id",
+              "type": "string",
+              "required": true
+            }
+          ]
+        },
+        {
+          "name": "search_market_data",
+          "method": "GET",
+          "url": "/travelpackage/search",
+          "description": "Search for market data based on keywords",
+          "query_parameters": [
+            {
+              "name": "keyword",
+              "type": "string",
+              "required": true
+            },
+            {
+              "name": "destination",
+              "type": "string",
+              "required": false
+            },
+            {
+              "name": "price_range",
+              "type": "string",
+              "required": false
+            }
+          ]
+        },
+        {
+          "name": "analyze_competitor_packages",
+          "method": "GET",
+          "url": "/travelpackage/competitor_analysis",
+          "description": "Analyze competitor packages",
+          "query_parameters": [
+            {
+              "name": "destination",
+              "type": "string",
+              "required": true
+            },
+            {
+              "name": "package_type",
+              "type": "string",
+              "required": false
+            }
+          ]
+        }
+      ],
+      "capabilities": [
+        "market_research",
+        "competitive_analysis",
+        "package_analysis",
+        "pricing_analysis",
+        "trend_identification",
+        "web_scraping",
+        "keyword_search"
+      ]
+    },
+    "admin_agent": {
+      "name": "Admin Agent",
+      "description": "Manages administrative operations including record creation and system maintenance",
+      "endpoints": [
+        {
+          "name": "create_expense_record",
+          "method": "POST",
+          "url": "/charges_group/create",
+          "description": "Create new expense record via admin interface",
+          "form_fields": [
+            {
+              "name": "program_date_from",
+              "type": "date",
+              "required": true
+            },
+            {
+              "name": "program_date_to",
+              "type": "date",
+              "required": true
+            },
+            {
+              "name": "program_id",
+              "type": "dropdown",
+              "required": true
+            },
+            {
+              "name": "tour_code",
+              "type": "dropdown",
+              "required": true
+            },
+            {
+              "name": "payment_date",
+              "type": "date",
+              "required": true
+            },
+            {
+              "name": "receipt_number",
+              "type": "text",
+              "required": true
+            },
+            {
+              "name": "expense_items",
+              "type": "dynamic_array",
+              "required": true
+            }
+          ]
+        },
+        {
+          "name": "manage_users",
+          "method": "GET",
+          "url": "/members",
+          "description": "Manage system users and agents"
+        },
+        {
+          "name": "manage_programs",
+          "method": "GET",
+          "url": "/travelpackage",
+          "description": "Manage travel programs"
+        },
+        {
+          "name": "system_logs",
+          "method": "GET",
+          "url": "/admin/logs",
+          "description": "View system logs and activities"
+        }
+      ],
+      "capabilities": [
+        "record_creation",
+        "user_management",
+        "system_administration",
+        "data_validation",
+        "audit_logging"
+      ]
+    },
+    "executive_agent": {
+      "name": "Executive Agent",
+      "description": "Aggregates data from all agents and generates executive reports with actionable insights",
+      "endpoints": [
+        {
+          "name": "get_dashboard_summary",
+          "method": "GET",
+          "url": "/dashboard",
+          "description": "Retrieve dashboard summary data"
+        },
+        {
+          "name": "generate_executive_report",
+          "method": "POST",
+          "url": "/report/executive",
+          "description": "Generate executive summary report",
+          "parameters": [
+            {
+              "name": "date_range",
+              "type": "date_range",
+              "required": true
+            },
+            {
+              "name": "report_type",
+              "type": "string",
+              "required": true,
+              "options": [
+                "sales_summary",
+                "financial_summary",
+                "market_analysis",
+                "performance_metrics"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "get_aggregated_metrics",
+          "method": "GET",
+          "url": "/report/metrics",
+          "description": "Retrieve aggregated performance metrics",
+          "query_parameters": [
+            {
+              "name": "metric_type",
+              "type": "string",
+              "required": false
+            }
+          ]
+        }
+      ],
+      "capabilities": [
+        "data_aggregation",
+        "report_generation",
+        "insight_generation",
+        "recommendation_generation",
+        "performance_analysis",
+        "strategic_planning"
+      ]
+    }
+  },
+  "external_integrations": {
+    "line_messaging_api": {
+      "enabled": true,
+      "description": "LINE Messaging API for user communication",
+      "endpoints": [
+        {
+          "name": "send_message",
+          "description": "Send message to user via LINE"
+        },
+        {
+          "name": "receive_message",
+          "description": "Receive messages from users via LINE"
+        },
+        {
+          "name": "send_rich_menu",
+          "description": "Send rich menu interface to users"
+        }
+      ]
+    },
+    "openai_api": {
+      "enabled": true,
+      "description": "OpenAI API for natural language processing and task understanding",
+      "models": [
+        "gpt-4",
+        "gpt-4-turbo",
+        "gpt-3.5-turbo"
+      ],
+      "capabilities": [
+        "text_generation",
+        "text_analysis",
+        "task_understanding",
+        "data_extraction"
+      ]
+    },
+    "clawbot": {
+      "enabled": true,
+      "description": "ClawBot for web automation and data extraction",
+      "capabilities": [
+        "web_scraping",
+        "form_filling",
+        "data_extraction",
+        "browser_automation"
+      ]
+    }
+  },
+  "data_models": {
+    "expense": {
+      "fields": [
+        "expense_id",
+        "program_id",
+        "tour_code",
+        "payment_date",
+        "receipt_number",
+        "items",
+        "total_amount",
+        "currency",
+        "created_date",
+        "created_by",
+        "edited_date",
+        "edited_by"
+      ]
+    },
+    "booking": {
+      "fields": [
+        "booking_id",
+        "customer_name",
+        "package_id",
+        "booking_date",
+        "travel_date",
+        "status",
+        "total_price",
+        "payment_status"
+      ]
+    },
+    "travel_package": {
+      "fields": [
+        "package_id",
+        "package_name",
+        "tour_code",
+        "destination_country",
+        "destination_city",
+        "package_type",
+        "duration_days",
+        "price",
+        "currency",
+        "itinerary",
+        "created_date",
+        "created_by"
+      ]
+    }
+  },
+  "workflow": {
+    "expense_processing": {
+      "steps": [
+        "receive_user_input",
+        "validate_input",
+        "extract_data",
+        "assign_to_accounting_agent",
+        "create_expense_record",
+        "notify_user"
+      ]
+    },
+    "report_generation": {
+      "steps": [
+        "receive_report_request",
+        "assign_to_data_analysis_agent",
+        "retrieve_data",
+        "aggregate_data",
+        "assign_to_executive_agent",
+        "generate_report",
+        "deliver_report"
+      ]
+    },
+    "market_analysis": {
+      "steps": [
+        "receive_analysis_request",
+        "assign_to_market_analysis_agent",
+        "search_market_data",
+        "analyze_packages",
+        "generate_insights",
+        "deliver_analysis"
+      ]
+    }
+  },
+  "error_handling": {
+    "retry_policy": {
+      "max_retries": 3,
+      "retry_delay_seconds": 5
+    },
+    "timeout": {
+      "default_timeout_seconds": 30,
+      "long_operation_timeout_seconds": 300
+    },
+    "fallback_behavior": "notify_user_and_log_error"
+  }
+}

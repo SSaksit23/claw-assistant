@@ -23,7 +23,7 @@ import logging
 from datetime import datetime
 from typing import Optional, Callable
 
-from openai import OpenAI
+
 from config import Config
 from services.document_parser import parse_file
 from services import n8n_integration
@@ -34,45 +34,24 @@ from tools import browser_tools
 logger = logging.getLogger(__name__)
 
 
+_GENERIC_CONTRACT_TERMS = {"甲方", "乙方", "丙方", "party a", "party b", "party c"}
+
+
 def translate_supplier_name(name: str) -> str:
     """
-    Translate a Chinese supplier name to English.
-    Returns the original name if it's already in English/Thai or if
-    translation fails.
+    Return the supplier name as-is (no translation).
+    Filters out generic contract role terms like 甲方/乙方 that are not
+    real company names.
     """
     if not name:
         return name
 
-    # Quick check: if it's mostly ASCII or Thai, no translation needed
-    non_ascii = sum(1 for c in name if ord(c) > 0x7F)
-    has_cjk = any('\u4e00' <= c <= '\u9fff' for c in name)
+    cleaned = name.strip().rstrip("-0123456789")
+    if cleaned.lower() in _GENERIC_CONTRACT_TERMS:
+        logger.info("Skipping generic contract term as supplier: '%s'", name)
+        return ""
 
-    if not has_cjk:
-        return name
-
-    try:
-        client = OpenAI(api_key=Config.OPENAI_API_KEY, timeout=30.0)
-        resp = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Translate the following Chinese company/supplier name to English. "
-                        "Return ONLY the English translation, nothing else."
-                    ),
-                },
-                {"role": "user", "content": name},
-            ],
-            temperature=0,
-            max_tokens=100,
-        )
-        translated = resp.choices[0].message.content.strip()
-        logger.info("Translated supplier: '%s' -> '%s'", name, translated)
-        return translated
-    except Exception as e:
-        logger.warning("Translation failed for '%s': %s", name, e)
-        return name
+    return name
 
 # In-memory job tracker
 _jobs = {}
@@ -565,15 +544,15 @@ async def _process_tour_group(
     supplier_name_raw = first.get("supplier_name", "")
     travel_date = first.get("travel_date", "")
     program_code = first.get("program_code", "")
-    company_name = first.get("company_name", "")
+    company_name = first.get("company_name", "") or "2U CENTER"
     currency = first.get("currency", "THB")
     exchange_rate = first.get("exchange_rate", 1.0)
 
     total_amount = sum(r.get("amount", 0) for r in line_items)
 
-    # ── Step A: Translate supplier name ──
-    _progress("translating supplier name...")
+    # ── Step A: Clean supplier name (keep original, filter generic terms) ──
     supplier_name = translate_supplier_name(supplier_name_raw)
+    logger.info("Supplier name: raw='%s' -> final='%s', company='%s'", supplier_name_raw, supplier_name, company_name)
 
     # ── Step B: Extract departure date from tour code ──
     depart_date = browser_tools.extract_date_from_tour_code(tour_code)
@@ -586,13 +565,9 @@ async def _process_tour_group(
     if not program_code:
         _progress("searching program code on /travelpackage...")
         try:
-            import asyncio as _aio
-            lookup = await _aio.wait_for(
-                browser_tools.search_program_code(tour_code, session_id=session_id),
-                timeout=60,
-            )
+            lookup = await browser_tools.search_program_code(tour_code, session_id=session_id)
         except Exception as search_err:
-            logger.warning("Program code search timed out or failed: %s", search_err)
+            logger.warning("Program code search failed: %s", search_err)
             lookup = {"status": "failed", "message": str(search_err)}
         if lookup["status"] == "success":
             program_code = lookup["program_code"]

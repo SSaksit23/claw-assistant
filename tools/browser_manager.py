@@ -182,7 +182,7 @@ class BrowserManager:
             ),
         )
         self._page = await self._context.new_page()
-        self._page.set_default_timeout(Config.BROWSER_TIMEOUT)
+        self._page.set_default_timeout(10000)
         logger.info(
             "Browser started for session=%s (headless=%s, pool=%d/%d)",
             self._session_id, Config.HEADLESS_MODE,
@@ -204,9 +204,12 @@ class BrowserManager:
     async def screenshot(self, name: str = "screenshot") -> str:
         os.makedirs("logs", exist_ok=True)
         path = f"logs/{name}_{self._session_id}.png"
-        if self._page:
-            await self._page.screenshot(path=path, full_page=True)
-            logger.debug("Screenshot saved: %s", path)
+        if self._page and not self._page.is_closed():
+            try:
+                await self._page.screenshot(path=path, full_page=False, timeout=5000)
+                logger.debug("Screenshot saved: %s", path)
+            except Exception as e:
+                logger.debug("Screenshot skipped (%s): %s", name, e)
         return path
 
     async def close(self):

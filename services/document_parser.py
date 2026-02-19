@@ -283,7 +283,10 @@ def _extract_records_with_llm(raw_text: str, file_type: str) -> dict:
 
     prompt = f"""Extract expense/charge records from the following document text.
 
-Also identify the **supplier name** (甲方 / Party A / the company issuing the bill).
+Also identify the **supplier name** — the ACTUAL company or person name that provides the service.
+IMPORTANT: Do NOT return generic contract roles like "甲方" (Party A) or "乙方" (Party B).
+Instead, find the real company name in the document (e.g., "昆明XX旅行社", "泰国XX公司").
+If you cannot find a specific name, return an empty string "".
 
 ## CURRENCY DETECTION (CRITICAL)
 Detect the ACTUAL currency from the document. Do NOT default to THB.

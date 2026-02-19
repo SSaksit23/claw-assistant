@@ -16,19 +16,62 @@ Supports two modes:
 """
 
 import os
+import re
 import json
 import uuid
 import logging
 from datetime import datetime
 from typing import Optional, Callable
 
+from openai import OpenAI
 from config import Config
 from services.document_parser import parse_file
 from services import n8n_integration
-from tools.browser_manager import BrowserManager, run_async
+from tools.browser_manager import BrowserManager, run_in_thread
 from tools import browser_tools
 
 logger = logging.getLogger(__name__)
+
+
+def translate_supplier_name(name: str) -> str:
+    """
+    Translate a Chinese supplier name to English.
+    Returns the original name if it's already in English/Thai or if
+    translation fails.
+    """
+    if not name:
+        return name
+
+    # Quick check: if it's mostly ASCII or Thai, no translation needed
+    non_ascii = sum(1 for c in name if ord(c) > 0x7F)
+    has_cjk = any('\u4e00' <= c <= '\u9fff' for c in name)
+
+    if not has_cjk:
+        return name
+
+    try:
+        client = OpenAI(api_key=Config.OPENAI_API_KEY, timeout=30.0)
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Translate the following Chinese company/supplier name to English. "
+                        "Return ONLY the English translation, nothing else."
+                    ),
+                },
+                {"role": "user", "content": name},
+            ],
+            temperature=0,
+            max_tokens=100,
+        )
+        translated = resp.choices[0].message.content.strip()
+        logger.info("Translated supplier: '%s' -> '%s'", name, translated)
+        return translated
+    except Exception as e:
+        logger.warning("Translation failed for '%s': %s", name, e)
+        return name
 
 # In-memory job tracker
 _jobs = {}
@@ -138,8 +181,9 @@ def _run_via_n8n(job_id: str, records: list, emit_fn) -> dict:
 
 
 def _run_direct(job_id: str, records: list, emit_fn) -> dict:
-    """Execute browser automation directly (no n8n)."""
-    result = run_async(_run_direct_async(job_id, records, emit_fn))
+    """Execute browser automation directly (no n8n).
+    Runs in a real OS thread so Playwright's asyncio loop is isolated."""
+    result = run_in_thread(_run_direct_async(job_id, records, emit_fn))
     return result
 
 
@@ -178,7 +222,11 @@ async def _run_direct_async(job_id: str, records: list, emit_fn) -> dict:
 
         _emit(emit_fn, "agent_progress", {
             "agent": "Accounting Agent",
-            "message": f"**Step 5/7:** Processing record {i}/{total}: `{tour_code}`...",
+            "message": (
+                f"**Step 5/7:** Processing record {i}/{total}: `{tour_code}`\n"
+                f"- Looking up program code on /travelpackage...\n"
+                f"- Extracting departure date from code..."
+            ),
         })
 
         entry_result = await _process_one_expense(record)
@@ -186,9 +234,15 @@ async def _run_direct_async(job_id: str, records: list, emit_fn) -> dict:
 
         if entry_result["status"] == "success":
             success_count += 1
+            prog = entry_result.get("program_code", "?")
+            dep = entry_result.get("depart_date", "?")
             _emit(emit_fn, "agent_progress", {
                 "agent": "Accounting Agent",
-                "message": f"**Step 6/7:** Record {i} submitted. Order: `{entry_result.get('expense_number', 'N/A')}`",
+                "message": (
+                    f"**Step 6/7:** Record {i} submitted.\n"
+                    f"- Program: `{prog}` | Depart: `{dep}`\n"
+                    f"- Order: `{entry_result.get('expense_number', 'N/A')}`"
+                ),
             })
         else:
             fail_count += 1
@@ -219,11 +273,12 @@ async def _run_direct_async(job_id: str, records: list, emit_fn) -> dict:
 
     if success_count > 0:
         summary += "### Successful Entries\n"
-        summary += "| Tour Code | Amount | Order Number |\n"
+        summary += "| Tour Code | Description | Order Number |\n"
         summary += "|-----------|--------|--------------|\n"
         for r in results:
             if r["status"] == "success":
-                summary += f"| `{r['tour_code']}` | {r.get('amount', '')} {r.get('currency', 'THB')} | `{r.get('expense_number', 'N/A')}` |\n"
+                desc = r.get("description", f"{r.get('amount', '')} {r.get('currency', 'THB')}")
+                summary += f"| `{r['tour_code']}` | {desc} | `{r.get('expense_number', 'N/A')}` |\n"
         summary += "\n"
 
     if fail_count > 0:
@@ -251,67 +306,204 @@ async def _run_direct_async(job_id: str, records: list, emit_fn) -> dict:
 
 
 async def _process_one_expense(record: dict) -> dict:
-    """Process a single expense record through the website form."""
+    """
+    Process a single expense record through the website form.
+
+    Workflow:
+    1. Extract departure date from tour code (last 6 digits = yymmdd)
+    2. Look up the program code on /travelpackage using the group code
+    3. Navigate to /charges_group/create
+    4. Set date range around the departure date so the program appears
+    5. Select the program using the program code
+    6. Select the tour code in the period dropdown
+    7. Fill description, type, amount, currency, remark
+    8. Submit and capture order number
+
+    Expected output format for the expense order:
+        Supplier Name
+        วันจ่าย : dd/mm/yy
+        เลขที่ : <auto-generated>
+        Code group : <tour_code>
+        วันที่ <date range>
+        รายละเอียด : <description> <unit_price> THB x <pax> PAX = <amount> THB
+        ***ยอดเงินรวม: <amount> THB
+    """
     tour_code = record.get("tour_code", "")
+    pax = record.get("pax", 0)
+    unit_price = record.get("unit_price", 0)
     amount = record.get("amount", 0)
-    description = record.get("description", tour_code)
-    charge_type = record.get("charge_type", "other")
+    raw_description = record.get("description", tour_code)
+    charge_type = record.get("charge_type", "flight")
     currency = record.get("currency", "THB")
     exchange_rate = record.get("exchange_rate", 1.0)
-    payment_date = record.get("travel_date") or datetime.now().strftime("%d/%m/%Y")
+    supplier_name_raw = record.get("supplier_name", "")
+    supplier_name = translate_supplier_name(supplier_name_raw)
+    travel_date = record.get("travel_date", "")
     program_code = record.get("program_code", "")
+    company_name = record.get("company_name", "")  # e.g. "Go365Travel", "2U Center"
+
+    # ── Step A: Extract departure date from tour code ──
+    depart_date = browser_tools.extract_date_from_tour_code(tour_code)
+    if depart_date:
+        logger.info("Departure date from tour code %s: %s", tour_code, depart_date)
+    else:
+        logger.info("No embedded date in tour code %s, using travel_date field", tour_code)
+
+    # ── Step B: Look up program code on /travelpackage ──
+    if not program_code:
+        logger.info("Looking up program code for %s on /travelpackage...", tour_code)
+        lookup = await browser_tools.search_program_code(tour_code)
+        if lookup["status"] == "success":
+            program_code = lookup["program_code"]
+            logger.info("Program code resolved: %s", program_code)
+        else:
+            logger.warning("Program code lookup failed: %s", lookup.get("message"))
+
+    # Calculate unit_price if only total and pax are known
+    if not unit_price and amount and pax:
+        unit_price = round(amount / pax)
+
+    # Build the formatted description line:
+    # "ค่ามัดจำตั่วเครื่องบิน 2160 THB x 21 PAX = 45360 THB"
+    if pax and unit_price:
+        formatted_desc = f"{raw_description} {unit_price} {currency} x {pax} PAX = {amount} {currency}"
+    else:
+        formatted_desc = f"{raw_description} {amount} {currency}"
+
+    # Build remark with full expense order info
+    remark_parts = []
+    if supplier_name:
+        remark_parts.append(supplier_name)
+    remark_parts.append(f"Code group: {tour_code}")
+    if travel_date:
+        remark_parts.append(f"Date: {travel_date}")
+    remark = "\n".join(remark_parts)
+
+    # Payment date: use today
+    payment_date = datetime.now().strftime("%d/%m/%Y")
+
+    # ── Step C: Build date range for the charges form filter ──
+    # The form requires a date range so the correct program shows in dropdowns.
+    # Use the departure date ± 30 days, or fall back to a wide window.
+    date_from, date_to = _build_date_range(depart_date)
 
     try:
-        # Navigate to form
+        # Navigate to the create form
         nav = await browser_tools.navigate_to_charges_form()
         if nav["status"] != "success":
             return {"tour_code": tour_code, "status": "failed", "error": f"Navigation: {nav['message']}"}
 
-        # Select program and tour
+        # Set date range and select program + tour code
         sel = await browser_tools.select_program_and_tour(
-            program_name=program_code, tour_code=tour_code,
+            program_name=program_code,
+            tour_code=tour_code,
+            date_from=date_from,
+            date_to=date_to,
         )
         if sel["status"] != "success":
-            return {"tour_code": tour_code, "status": "failed", "error": f"Selection: {sel['message']}"}
+            logger.warning("Program selection returned: %s -- continuing anyway", sel.get("message"))
 
-        # Fill form
+        # Fill section 1 (expense details)
         fill = await browser_tools.fill_expense_form(
             payment_date=payment_date,
-            description=description,
+            description=formatted_desc,
             charge_type=charge_type,
             amount=amount,
             currency=currency,
             exchange_rate=exchange_rate,
+            remark=remark,
         )
         if fill["status"] != "success":
             return {"tour_code": tour_code, "status": "failed", "error": f"Form fill: {fill['message']}"}
+
+        # Click "+ เพิ่มในค่าใช้จ่ายบริษัท" to reveal section 2
+        add_btn = await browser_tools.click_add_company_expense()
+        if add_btn["status"] != "success":
+            logger.warning("Could not open company expense section: %s", add_btn.get("message"))
+
+        # Fill section 2 (company expense)
+        # Map charge_type to the Thai payment type category
+        payment_type_map = {
+            "flight": "ค่าตั๋วเครื่องบิน",
+            "visa": "ค่าวีซ่า",
+            "accommodation": "ค่าทัวร์/ค่าแลนด์",
+            "tour_guide": "ค่าทัวร์/ค่าแลนด์",
+            "meal": "ค่าทัวร์/ค่าแลนด์",
+            "taxi": "ค่าใช้จ่ายเบ็ดเตล็ด",
+            "other": "ค่าทัวร์/ค่าแลนด์",
+        }
+        company_remark_parts = []
+        if tour_code:
+            company_remark_parts.append(tour_code)
+        if program_code:
+            company_remark_parts.append(program_code)
+
+        comp_fill = await browser_tools.fill_company_expense(
+            company_name=company_name,
+            payment_method="โอนเข้าบัญชี",
+            supplier_name=supplier_name,
+            amount=amount,
+            payment_date=payment_date,
+            payment_type=payment_type_map.get(charge_type, "ค่าทัวร์/ค่าแลนด์"),
+            period=tour_code,
+            remark=" / ".join(company_remark_parts),
+        )
+        if comp_fill["status"] != "success":
+            logger.warning("Company expense fill issue: %s", comp_fill.get("message"))
 
         # Submit
         sub = await browser_tools.submit_form()
         if sub["status"] != "success":
             return {"tour_code": tour_code, "status": "failed", "error": f"Submit: {sub['message']}"}
 
-        # Extract order number
+        # Extract the expense number
         ext = await browser_tools.extract_order_number()
 
         return {
             "tour_code": tour_code,
             "program_code": program_code,
+            "supplier_name": supplier_name,
             "amount": amount,
+            "unit_price": unit_price,
+            "pax": pax,
             "currency": currency,
+            "description": formatted_desc,
+            "depart_date": depart_date,
             "status": "success",
             "expense_number": ext.get("expense_number", "UNKNOWN"),
             "timestamp": datetime.now().isoformat(),
         }
 
     except Exception as e:
-        logger.error(f"Expense failed for {tour_code}: {e}", exc_info=True)
+        logger.error("Expense failed for %s: %s", tour_code, e, exc_info=True)
         return {
             "tour_code": tour_code,
             "status": "failed",
             "error": str(e),
             "timestamp": datetime.now().isoformat(),
         }
+
+
+def _build_date_range(depart_date_str: str | None) -> tuple[str, str]:
+    """
+    Build a start/end date range (dd/mm/yyyy) for the charges form filter.
+
+    If a departure date is available, uses depart_date ± 30 days.
+    Otherwise falls back to a 90-day window around today.
+    """
+    from datetime import timedelta
+
+    if depart_date_str:
+        try:
+            center = datetime.strptime(depart_date_str, "%d/%m/%Y")
+        except ValueError:
+            center = datetime.now()
+    else:
+        center = datetime.now()
+
+    start = center - timedelta(days=30)
+    end = center + timedelta(days=30)
+    return start.strftime("%d/%m/%Y"), end.strftime("%d/%m/%Y")
 
 
 def process_single_expense_api(data: dict) -> dict:
@@ -330,7 +522,7 @@ def process_single_expense_api(data: dict) -> dict:
         "travel_date": data.get("travel_date"),
     }
 
-    result = run_async(_process_one_expense(record))
+    result = run_in_thread(_process_one_expense(record))
     return result
 
 
@@ -358,12 +550,16 @@ def _emit(emit_fn, event: str, data: dict):
 def _describe_fields(record: dict) -> str:
     """Describe what fields were found in a record."""
     parts = []
+    if record.get("supplier_name"):
+        parts.append(f"supplier=`{record['supplier_name']}`")
     if record.get("tour_code"):
         parts.append(f"group code=`{record['tour_code']}`")
     if record.get("travel_date"):
         parts.append(f"date=`{record['travel_date']}`")
     if record.get("pax"):
         parts.append(f"size=`{record['pax']}`")
+    if record.get("unit_price"):
+        parts.append(f"unit price=`{record['unit_price']}`")
     if record.get("amount"):
-        parts.append(f"price=`{record['amount']}`")
+        parts.append(f"total=`{record['amount']}`")
     return ", ".join(parts) if parts else "basic fields detected"

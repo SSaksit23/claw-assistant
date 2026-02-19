@@ -22,15 +22,16 @@ from config import Config
 logger = logging.getLogger(__name__)
 
 
-# Expected output fields for an expense record
 EXPENSE_FIELDS = {
-    "tour_code": "Tour/group code (e.g., BTMYSP16N240107)",
+    "tour_code": "Tour/group code (e.g., GO1TAO5NTAOQW260304)",
     "program_code": "Program code for the travel program",
-    "travel_date": "Travel date or date range",
+    "travel_date": "Travel date or date range (e.g., 0304-0309 or 10-13 Mar)",
     "pax": "Number of passengers / group size",
-    "amount": "Expense amount",
+    "unit_price": "Price per person/unit",
+    "amount": "Total expense amount (unit_price x pax)",
     "currency": "Currency (default THB)",
-    "description": "Description of the expense",
+    "supplier_name": "Supplier / company name (Party A / 甲方)",
+    "description": "Description of the expense (flight route, service name, etc.)",
     "charge_type": "Type: flight, visa, meal, taxi, accommodation, tour_guide, other",
 }
 
@@ -278,28 +279,33 @@ def _parse_text(file_path: str) -> dict:
 # ---------------------------------------------------------------------------
 def _extract_records_with_llm(raw_text: str, file_type: str) -> dict:
     """Use OpenAI to extract structured expense records from raw text."""
-    client = OpenAI(api_key=Config.OPENAI_API_KEY)
+    client = OpenAI(api_key=Config.OPENAI_API_KEY, timeout=90.0)
 
     prompt = f"""Extract expense/charge records from the following document text.
 
+Also identify the **supplier name** (甲方 / Party A / the company issuing the bill).
+
 For each record, identify these fields:
-- tour_code: Tour or group code (e.g., BTMYSP16N240107, JAPAN7N-001)
+- tour_code: Tour or group code (e.g., GO1TAO5NTAOQW260304)
 - program_code: Program code if available
-- travel_date: Travel date or date range
+- travel_date: Travel date or date range (e.g., "0304-0309")
 - pax: Number of passengers / group size
-- amount: Expense amount (number only)
+- unit_price: Price per person (单价)
+- amount: Total expense amount (unit_price * pax = amount)
 - currency: Currency code (default THB if not specified)
-- description: Brief description of the expense
+- description: Description of the service (e.g., flight route, ticket deposit)
 - charge_type: One of: flight, visa, meal, taxi, accommodation, tour_guide, other
 
 Return ONLY valid JSON in this format:
 {{
+    "supplier_name": "the company/supplier name",
     "records": [
         {{
             "tour_code": "string",
             "program_code": "string or null",
             "travel_date": "string or null",
             "pax": number or null,
+            "unit_price": number or null,
             "amount": number,
             "currency": "THB",
             "description": "string",
@@ -331,11 +337,16 @@ Document text:
 
         result = json.loads(response.choices[0].message.content)
         records = result.get("records", [])
+        supplier_name = result.get("supplier_name", "")
+
+        for rec in records:
+            rec["supplier_name"] = supplier_name
 
         return {
             "status": "success",
             "file_type": file_type,
             "extraction_method": "llm",
+            "supplier_name": supplier_name,
             "total_rows": len(records),
             "valid_records": len(records),
             "invalid_records": 0,

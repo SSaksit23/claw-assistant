@@ -1,6 +1,11 @@
 """
-Assignment Agent -- Central coordinator that receives user requests,
-classifies intent, and delegates to specialized agents.
+Assignment Agent -- Central coordinator and the 'face' of the chat.
+
+Every user message flows through here. The agent uses OpenAI to:
+1. Understand intent (conversational, so it handles follow-ups too)
+2. Reply in natural language
+3. Decide whether to delegate to a specialist agent
+4. Extract parameters the specialist needs
 """
 
 import json
@@ -8,26 +13,25 @@ import logging
 from datetime import datetime
 
 from openai import OpenAI
-
 from config import Config
 
 logger = logging.getLogger(__name__)
 
-client = OpenAI(api_key=Config.OPENAI_API_KEY)
+client = OpenAI(api_key=Config.OPENAI_API_KEY, timeout=60.0)
 
-# Intent categories that map to specialized agents
-INTENT_CATEGORIES = {
+# ── Intent categories ──────────────────────────────────────────────────────
+INTENTS = {
     "expense_recording": {
         "agent": "Accounting Agent",
-        "description": "Record expenses, create charge entries, process CSV expense files",
+        "description": "Record expenses / charge entries, process CSV expense files, create orders on qualityb2bpackage.com",
     },
     "data_analysis": {
         "agent": "Data Analysis Agent",
-        "description": "Retrieve booking data, sales reports, seller performance",
+        "description": "Retrieve booking data, sales reports, seller performance from the website",
     },
     "market_analysis": {
         "agent": "Market Analysis Agent",
-        "description": "Analyze travel packages, competitive pricing, market trends",
+        "description": "Analyse travel packages, competitive pricing, market trends, itinerary comparison",
     },
     "executive_report": {
         "agent": "Executive Agent",
@@ -35,101 +39,136 @@ INTENT_CATEGORIES = {
     },
     "admin_task": {
         "agent": "Admin Agent",
-        "description": "Administrative record management, data entry, system maintenance",
+        "description": "List / search existing records, system maintenance, lookups on the website",
     },
-    "general_query": {
+    "general": {
         "agent": "Assignment Agent",
-        "description": "General questions, help, status checks, greetings",
+        "description": "Greetings, help, status checks, general questions about the system",
     },
 }
 
-SYSTEM_PROMPT = """You are the Assignment Agent for the Web365 ClawBot system -- a multi-agent platform for managing Quality B2B Package travel operations.
-
-Your job is to:
-1. Understand the user's request
-2. Classify it into one of these intent categories: {categories}
-3. Generate a helpful response
-4. If the request requires a specialized agent, prepare the task delegation
-
-Always respond in valid JSON with this structure:
-{{
-    "intent": "<intent_category>",
-    "confidence": <0.0 to 1.0>,
-    "response": "<your natural language response to the user>",
-    "task_details": {{
-        "action": "<specific action to perform>",
-        "parameters": {{<any extracted parameters>}}
-    }}
-}}
-
-Context about the system:
-- Expense Recording: automates filling expense forms on qualityb2bpackage.com from CSV data
-- Data Analysis: scrapes booking data and seller reports from the website
-- Market Analysis: analyzes travel packages and competitive landscape
-- Executive Reports: aggregates all data into strategic business reports
-- Admin Tasks: general administrative record management on the website
-
-Be concise and helpful. If the user provides a file (CSV), assume they want expense processing unless stated otherwise."""
-
-CATEGORIES_STR = "\n".join(
-    f"- {k}: {v['description']}" for k, v in INTENT_CATEGORIES.items()
+CATEGORIES_BLOCK = "\n".join(
+    f"- {key}: {info['description']}" for key, info in INTENTS.items()
 )
 
+SYSTEM_PROMPT = f"""You are the **Assignment Agent** for Web365 ClawBot -- the central coordinator for a multi-agent system that manages Quality B2B Package travel operations at qualityb2bpackage.com.
 
-def classify_intent(message: str, file_path: str = None) -> dict:
-    """Use OpenAI to classify user intent and generate a response."""
-    user_content = message
+## Your responsibilities
+1. Greet the user warmly and answer questions conversationally.
+2. Classify every request into ONE of these intents:
+{CATEGORIES_BLOCK}
+3. When delegation is needed, extract the parameters the specialist agent requires.
+4. If the user's request is vague, ask a short clarifying question (intent = "general").
+
+## Specialist capabilities (so you can tell the user what's possible)
+- **Accounting Agent** -- Upload a CSV / Excel / PDF file with tour codes and amounts. The system logs in to qualityb2bpackage.com, fills the charges form, submits, and returns order numbers.
+- **Data Analysis Agent** -- Scrapes the /booking and /report/report_seller pages and returns structured data.
+- **Market Analysis Agent** -- Scrapes /travelpackage, analyses the product catalogue, produces competitive insights. Can also parse uploaded itinerary PDFs and compare them.
+- **Executive Agent** -- Aggregates outputs from all other agents into a strategic report with recommendations.
+- **Admin Agent** -- Lists existing expense records, bookings, or performs lookups on the website.
+
+## Response format
+Always reply with **valid JSON** (nothing else):
+{{{{
+  "intent": "<one of the intent keys above>",
+  "confidence": <0.0-1.0>,
+  "response": "<your natural language reply -- markdown is fine>",
+  "delegate": true | false,
+  "task_details": {{{{
+    "action": "<what the specialist should do>",
+    "parameters": {{{{ ... }}}}
+  }}}}
+}}}}
+
+Set `delegate` to **false** when you can answer directly (greetings, help, clarifications).
+Set `delegate` to **true** when a specialist agent should take over.
+"""
+
+
+def process_message(
+    message: str,
+    file_path: str = None,
+    history: list = None,
+) -> dict:
+    """
+    Classify the user's message and produce a response + delegation decision.
+
+    Returns dict with keys: intent, response, delegate, agent, task_details
+    """
+    # Build conversation messages
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+    # Include recent history for context (last 6 turns max)
+    if history:
+        for turn in history[-6:]:
+            messages.append({
+                "role": turn.get("role", "user"),
+                "content": turn.get("content", ""),
+            })
+
+    # Current user message
+    user_content = message or ""
     if file_path:
-        user_content += f"\n\n[User has uploaded a file: {file_path}]"
+        user_content += f"\n\n[The user has uploaded a file: {file_path}]"
+    messages.append({"role": "user", "content": user_content})
 
     try:
-        response = client.chat.completions.create(
+        resp = client.chat.completions.create(
             model=Config.OPENAI_MODEL,
-            messages=[
-                {
-                    "role": "system",
-                    "content": SYSTEM_PROMPT.format(categories=CATEGORIES_STR),
-                },
-                {"role": "user", "content": user_content},
-            ],
+            messages=messages,
             temperature=0.3,
-            max_tokens=1000,
+            max_tokens=1024,
             response_format={"type": "json_object"},
         )
-
-        result = json.loads(response.choices[0].message.content)
-        logger.info(f"Intent classified: {result.get('intent')} (confidence: {result.get('confidence')})")
+        result = json.loads(resp.choices[0].message.content)
+        logger.info(
+            "Assignment Agent -> intent=%s  delegate=%s  confidence=%.2f",
+            result.get("intent"),
+            result.get("delegate"),
+            result.get("confidence", 0),
+        )
         return result
 
     except Exception as e:
-        logger.error(f"Intent classification failed: {e}", exc_info=True)
+        logger.error(f"Assignment Agent LLM call failed: {e}", exc_info=True)
         return {
-            "intent": "general_query",
-            "confidence": 0.0,
-            "response": f"I'm having trouble understanding your request right now. Error: {str(e)}",
+            "intent": "general",
+            "confidence": 0,
+            "response": f"Sorry, I'm having trouble processing your request. ({e})",
+            "delegate": False,
             "task_details": {},
         }
 
 
-def _delegate_to_agent(intent: str, task_details: dict, file_path: str, emit_fn):
-    """Delegate the task to the appropriate specialized agent."""
-    agent_info = INTENT_CATEGORIES.get(intent, INTENT_CATEGORIES["general_query"])
-    agent_name = agent_info["agent"]
+def delegate(intent: str, task_details: dict, file_path: str, emit_fn) -> dict | None:
+    """
+    Hand off to the appropriate specialist agent.
 
-    # Notify UI which agent is working
+    Returns {"content": "...", "data": ...} or None.
+    """
+    info = INTENTS.get(intent, INTENTS["general"])
+    agent_name = info["agent"]
+
+    if intent == "general":
+        return None  # nothing to delegate
+
+    # Show the specialist as active
     if emit_fn:
         emit_fn("agent_status", {
             "agent": agent_name,
             "status": "working",
-            "message": f"Processing: {task_details.get('action', 'task')}",
+            "message": f"Working on: {task_details.get('action', 'task')}",
         })
 
     result = None
-
     try:
         if intent == "expense_recording":
-            from agents.accounting_agent import handle_expense_task
-            result = handle_expense_task(task_details, file_path, emit_fn)
+            if file_path:
+                from services.expense_service import start_expense_job
+                result = start_expense_job(file_path=file_path, emit_fn=emit_fn)
+            else:
+                from agents.accounting_agent import handle_expense_task
+                result = handle_expense_task(task_details, file_path, emit_fn)
 
         elif intent == "data_analysis":
             from agents.data_analysis_agent import handle_data_analysis_task
@@ -148,7 +187,7 @@ def _delegate_to_agent(intent: str, task_details: dict, file_path: str, emit_fn)
             result = handle_admin_task(task_details, emit_fn)
 
     except Exception as e:
-        logger.error(f"Agent {agent_name} failed: {e}", exc_info=True)
+        logger.error(f"{agent_name} failed: {e}", exc_info=True)
         result = {"content": f"The {agent_name} encountered an error: {str(e)}"}
 
     finally:
@@ -160,60 +199,3 @@ def _delegate_to_agent(intent: str, task_details: dict, file_path: str, emit_fn)
             })
 
     return result
-
-
-def process_user_request(
-    message: str,
-    file_path: str = None,
-    session_id: str = None,
-    emit_fn=None,
-) -> dict:
-    """
-    Main entry point: classify user intent and route to the right agent.
-
-    Returns a dict with 'content', 'agent', and optionally 'data'.
-    """
-    logger.info(f"Processing request (session={session_id}): {message[:100]}")
-
-    # Step 1: Classify intent
-    classification = classify_intent(message, file_path)
-    intent = classification.get("intent", "general_query")
-    response_text = classification.get("response", "")
-    task_details = classification.get("task_details", {})
-
-    # Step 2: For general queries, just return the LLM response
-    if intent == "general_query":
-        return {
-            "content": response_text,
-            "agent": "Assignment Agent",
-            "data": None,
-        }
-
-    # Step 3: Notify the user about delegation
-    agent_info = INTENT_CATEGORIES.get(intent, {})
-    agent_name = agent_info.get("agent", "Unknown Agent")
-
-    if emit_fn:
-        emit_fn("agent_progress", {
-            "agent": "Assignment Agent",
-            "message": f"Routing your request to **{agent_name}**...",
-        })
-
-    # Step 4: Delegate to specialized agent
-    agent_result = _delegate_to_agent(intent, task_details, file_path, emit_fn)
-
-    if agent_result and agent_result.get("content"):
-        # Combine assignment agent intro with specialized agent response
-        combined = f"{response_text}\n\n---\n\n{agent_result['content']}"
-        return {
-            "content": combined,
-            "agent": agent_name,
-            "data": agent_result.get("data"),
-        }
-
-    # If specialized agent had no output, return the assignment agent's response
-    return {
-        "content": response_text,
-        "agent": "Assignment Agent",
-        "data": None,
-    }

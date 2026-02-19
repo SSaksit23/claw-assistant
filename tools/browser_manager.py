@@ -4,31 +4,48 @@ Singleton Browser Manager for Playwright.
 Manages a single browser instance shared across all agents to avoid
 re-authentication overhead. Supports headless/headed mode, screenshots,
 and cookie/session persistence.
+
+IMPORTANT: Playwright uses asyncio internally. Eventlet monkey-patches
+the standard library (socket, select, threading) in ways that break
+asyncio.  Therefore all Playwright work MUST run in a REAL OS thread
+with an unpatched asyncio event loop.
+
+We obtain the *original* (unpatched) threading module via
+eventlet.patcher.original() so that our ThreadPoolExecutor creates
+actual OS threads, not eventlet green threads.
 """
 
 import os
-import logging
 import asyncio
+import logging
+import threading
+import queue as _queue
 from typing import Optional
 
 from config import Config
 
+# Get the REAL (unpatched) threading module so we can spawn actual OS
+# threads even after eventlet.monkey_patch(thread=True).
+try:
+    from eventlet.patcher import original as _original
+    _real_threading = _original("threading")
+except Exception:
+    _real_threading = threading
+
 logger = logging.getLogger(__name__)
+
+_thread_lock = threading.Lock()
 
 
 class BrowserManager:
     """
     Singleton that manages the Playwright browser lifecycle.
 
-    Usage:
-        manager = BrowserManager.get_instance()
-        page = await manager.get_page()
-        # ... do work ...
-        await manager.close()
+    Usage (sync, from any greenlet):
+        result = run_in_thread(some_async_playwright_function())
     """
 
     _instance: Optional["BrowserManager"] = None
-    _lock = asyncio.Lock() if hasattr(asyncio, "Lock") else None
 
     def __init__(self):
         self._playwright = None
@@ -39,13 +56,12 @@ class BrowserManager:
 
     @classmethod
     def get_instance(cls) -> "BrowserManager":
-        """Return the singleton instance."""
-        if cls._instance is None:
-            cls._instance = cls()
-        return cls._instance
+        with _thread_lock:
+            if cls._instance is None:
+                cls._instance = cls()
+            return cls._instance
 
     async def _ensure_browser(self):
-        """Start Playwright and browser if not already running."""
         if self._browser and self._browser.is_connected():
             return
 
@@ -67,10 +83,9 @@ class BrowserManager:
         )
         self._page = await self._context.new_page()
         self._page.set_default_timeout(Config.BROWSER_TIMEOUT)
-        logger.info(f"Browser started (headless={Config.HEADLESS_MODE})")
+        logger.info("Browser started (headless=%s)", Config.HEADLESS_MODE)
 
     async def get_page(self):
-        """Return the shared page instance, starting browser if needed."""
         await self._ensure_browser()
         return self._page
 
@@ -83,16 +98,14 @@ class BrowserManager:
         self._logged_in = value
 
     async def screenshot(self, name: str = "screenshot") -> str:
-        """Take a screenshot for debugging. Returns the file path."""
         os.makedirs("logs", exist_ok=True)
         path = f"logs/{name}.png"
         if self._page:
             await self._page.screenshot(path=path, full_page=True)
-            logger.debug(f"Screenshot saved: {path}")
+            logger.debug("Screenshot saved: %s", path)
         return path
 
     async def close(self):
-        """Gracefully close browser and Playwright."""
         try:
             if self._page and not self._page.is_closed():
                 await self._page.close()
@@ -103,7 +116,7 @@ class BrowserManager:
             if self._playwright:
                 await self._playwright.stop()
         except Exception as e:
-            logger.warning(f"Error closing browser: {e}")
+            logger.warning("Error closing browser: %s", e)
         finally:
             self._page = None
             self._context = None
@@ -114,24 +127,47 @@ class BrowserManager:
             logger.info("Browser closed")
 
     async def reset(self):
-        """Close and re-create browser (useful after errors)."""
         await self.close()
         await self._ensure_browser()
 
 
-def run_async(coro):
+def run_in_thread(coro):
     """
-    Helper to run async code from synchronous context.
-    Creates or reuses an event loop.
+    Run an async Playwright coroutine in a REAL OS thread so it gets
+    a clean asyncio event loop, free from eventlet monkey-patching.
+
+    Uses the *original* (unpatched) threading.Thread to guarantee a
+    native OS thread.  Instead of t.join() (which would block the
+    eventlet event loop), we poll t.is_alive() and yield to eventlet
+    between checks so heartbeats keep flowing.
     """
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                future = pool.submit(asyncio.run, coro)
-                return future.result()
-        else:
-            return loop.run_until_complete(coro)
-    except RuntimeError:
-        return asyncio.run(coro)
+    result_q: _queue.Queue = _queue.Queue()
+
+    def _worker():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            result = loop.run_until_complete(coro)
+            result_q.put(("ok", result))
+        except Exception as exc:
+            result_q.put(("error", exc))
+        finally:
+            loop.close()
+
+    t = _real_threading.Thread(target=_worker, daemon=True)
+    t.start()
+
+    # Poll for thread completion, yielding to eventlet so the
+    # WebSocket heartbeat loop is never starved.
+    import eventlet
+    while t.is_alive():
+        eventlet.sleep(0.2)
+
+    status, value = result_q.get_nowait()
+    if status == "error":
+        raise value
+    return value
+
+
+# Backward-compatible alias
+run_async = run_in_thread

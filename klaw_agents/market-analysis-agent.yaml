@@ -1,0 +1,37 @@
+# klaw agent definition — Market Analysis Agent
+apiVersion: klaw/v1
+kind: Agent
+metadata:
+  name: market-analysis-agent
+  namespace: research
+  labels:
+    team: research
+    app: clawbot
+spec:
+  description: >
+    Market intelligence specialist. Scrapes the travel package
+    catalog from qualityb2bpackage.com, analyzes competitive
+    landscape and pricing, and produces strategic market insights.
+  model: gpt-4o-mini
+  skills:
+    - market-analysis
+    - web-scraping
+    - browser-automation
+    - competitive-intelligence
+  tools:
+    - browser_tools
+    - itinerary_tools
+  runner:
+    type: python
+    command: "python -m agents.cli_runner --agent market_analysis"
+    workdir: "."
+    env:
+      - OPENAI_API_KEY
+      - WEBSITE_USERNAME
+      - WEBSITE_PASSWORD
+      - WEBSITE_URL
+      - EXA_API_KEY
+      - HEADLESS_MODE
+  health:
+    timeout: 120s
+    retries: 2

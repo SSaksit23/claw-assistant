@@ -1,0 +1,34 @@
+# klaw agent definition — Data Analysis Agent
+apiVersion: klaw/v1
+kind: Agent
+metadata:
+  name: data-analysis-agent
+  namespace: research
+  labels:
+    team: research
+    app: clawbot
+spec:
+  description: >
+    Data retrieval specialist. Scrapes booking data and seller
+    performance reports from qualityb2bpackage.com, structures
+    the output as JSON, and saves it for downstream analysis.
+  model: gpt-4o-mini
+  skills:
+    - web-scraping
+    - data-extraction
+    - browser-automation
+  tools:
+    - browser_tools
+  runner:
+    type: python
+    command: "python -m agents.cli_runner --agent data_analysis"
+    workdir: "."
+    env:
+      - OPENAI_API_KEY
+      - WEBSITE_USERNAME
+      - WEBSITE_PASSWORD
+      - WEBSITE_URL
+      - HEADLESS_MODE
+  health:
+    timeout: 90s
+    retries: 2

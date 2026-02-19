@@ -1,0 +1,6 @@
+﻿Job ID,Tour Code,Program Code,Supplier,Line Items,Total Amount,Currency,Departure Date,Order Number,Status,Error,Timestamp
+c5f638b7,GO1TAO5NTAOQW260304,GO1TAO-QW001,"Chengdu Haiyou Holiday International Travel Agency Co., Ltd.","Flight: 45,360 CNY",45360,CNY,04/03/2026,C202619-144626,success,,2026-02-19T11:54:47.386251
+c5f638b7,GO1TAO6NTAOQW260309,GO1TAO-QW002,"Chengdu Haiyou Holiday International Travel Agency Co., Ltd.","Flight: 45,360 CNY",45360,CNY,09/03/2026,C202619-144627,success,,2026-02-19T11:55:45.991351
+c5f638b7,GO1TAO5NTAOQW260315,GO1TAO-QW001,"Chengdu Haiyou Holiday International Travel Agency Co., Ltd.","Flight: 45,360 CNY",45360,CNY,15/03/2026,C202619-144628,success,,2026-02-19T11:56:45.354355
+c5f638b7,GO1TAO5NTAOQW260320,GO1TAO-QW001,"Chengdu Haiyou Holiday International Travel Agency Co., Ltd.","Flight: 45,360 CNY",45360,CNY,20/03/2026,C202619-144629,success,,2026-02-19T11:57:43.900669
+c5f638b7,GO1TAO5NTAOQW260325A,GO1TAO-QW001,"Chengdu Haiyou Holiday International Travel Agency Co., Ltd.","Flight: 45,360 CNY",45360,CNY,25/03/2026,C202619-144631,success,,2026-02-19T11:58:42.269270

@@ -16,6 +16,7 @@ from flask_socketio import emit
 from flask import request
 
 from app import socketio
+from services import learning_service
 
 logger = logging.getLogger(__name__)
 
@@ -165,6 +166,14 @@ def _process_in_background(sid, message, file_path, history):
 
     except Exception as e:
         logger.error(f"Background processing failed: {e}", exc_info=True)
+        learning_service.log_error(
+            agent="System",
+            error_type="background_processing",
+            summary="Background task processing failed",
+            error_message=str(e),
+            context=f"Message: {message[:200] if message else 'N/A'}, File: {file_path}",
+            related_files=["app/websocket.py"],
+        )
         _emit("agent_response", {
             "type": "error",
             "content": f"An error occurred: {str(e)}",
@@ -175,6 +184,40 @@ def _process_in_background(sid, message, file_path, history):
             "status": "idle",
             "message": "Ready",
         })
+
+
+@socketio.on("user_feedback")
+def handle_user_feedback(data):
+    """Handle explicit user feedback/corrections to improve agent learning."""
+    feedback_type = data.get("type", "correction")
+    content = data.get("content", "")
+    context = data.get("context", "")
+
+    if not content:
+        return
+
+    if feedback_type == "correction":
+        learning_service.log_learning(
+            agent="User Feedback",
+            category="correction",
+            summary=content[:200],
+            details=f"User correction: {content}\nContext: {context}",
+            suggested_action="Apply this correction in future similar tasks",
+            priority="high",
+            tags=["user_feedback", "correction"],
+        )
+    elif feedback_type == "feature_request":
+        learning_service.log_feature_request(
+            agent="User Feedback",
+            capability=content[:200],
+            user_context=context,
+        )
+
+    emit("system_message", {
+        "type": "system",
+        "content": "Thank you for your feedback! I'll remember this for next time.",
+        "timestamp": datetime.utcnow().isoformat(),
+    })
 
 
 def _safe(text, maxlen=80):

@@ -1,0 +1,85 @@
+# ─────────────────────────────────────────────────────────────
+#  klaw scheduled jobs for Web365 ClawBot
+#
+#  These cron definitions let klaw automatically trigger agents
+#  on a schedule — something the original ClawBot lacks.
+#
+#  Apply with:  klaw apply -f klaw_agents/schedules.yaml
+#  List with:   klaw cron list
+# ─────────────────────────────────────────────────────────────
+
+# ── Daily: Scrape latest booking data every morning at 8:00 ──
+apiVersion: klaw/v1
+kind: CronJob
+metadata:
+  name: daily-booking-scrape
+  namespace: research
+spec:
+  schedule: "0 8 * * *"              # 08:00 daily (Asia/Bangkok)
+  agent: data-analysis-agent
+  task: >
+    Scrape all booking data and seller performance reports
+    from qualityb2bpackage.com. Save structured JSON output.
+  parameters:
+    action: scrape
+    analysis_type: all
+  timeout: 120s
+
+---
+
+# ── Daily: Market package scan at 9:00 ───────────────────────
+apiVersion: klaw/v1
+kind: CronJob
+metadata:
+  name: daily-market-scan
+  namespace: research
+spec:
+  schedule: "0 9 * * *"              # 09:00 daily
+  agent: market-analysis-agent
+  task: >
+    Scrape the travel package catalog and produce a competitive
+    market analysis with pricing insights and recommendations.
+  parameters:
+    action: analyze
+  timeout: 180s
+
+---
+
+# ── Weekly: Executive report every Monday at 8:30 ────────────
+apiVersion: klaw/v1
+kind: CronJob
+metadata:
+  name: weekly-executive-report
+  namespace: operations
+spec:
+  schedule: "30 8 * * MON"           # Monday 08:30
+  agent: executive-agent
+  task: >
+    Aggregate all available data (bookings, market analysis,
+    expenses) and generate a comprehensive executive report
+    with strategic recommendations. Post summary to Slack.
+  parameters:
+    action: generate_report
+  timeout: 120s
+  depends_on:
+    - daily-booking-scrape
+    - daily-market-scan
+
+---
+
+# ── Hourly: Check for new expense records ────────────────────
+apiVersion: klaw/v1
+kind: CronJob
+metadata:
+  name: hourly-expense-check
+  namespace: finance
+spec:
+  schedule: "0 * * * *"              # every hour on the hour
+  agent: admin-agent
+  task: >
+    List the latest expense records from the charges_group page
+    and save an updated snapshot.
+  parameters:
+    action: list_expenses
+  timeout: 90s
+  enabled: false                     # enable when ready for production

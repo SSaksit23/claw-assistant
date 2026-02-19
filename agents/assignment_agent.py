@@ -14,6 +14,7 @@ from datetime import datetime
 
 from openai import OpenAI
 from config import Config
+from services import learning_service
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +111,16 @@ def process_message(
     user_content = message or ""
     if file_path:
         user_content += f"\n\n[The user has uploaded a file: {file_path}]"
+
+    # Consult past learnings for relevant context
+    past_learnings = learning_service.get_relevant_learnings(
+        task_description=user_content,
+        agent="Assignment Agent",
+        limit=3,
+    )
+    if past_learnings:
+        user_content += f"\n\n[SYSTEM - Past learnings to consider:\n{past_learnings}]"
+
     messages.append({"role": "user", "content": user_content})
 
     try:
@@ -131,6 +142,14 @@ def process_message(
 
     except Exception as e:
         logger.error(f"Assignment Agent LLM call failed: {e}", exc_info=True)
+        learning_service.log_error(
+            agent="Assignment Agent",
+            error_type="llm_call_failed",
+            summary="OpenAI API call failed during intent classification",
+            error_message=str(e),
+            context=f"User message: {message[:200]}",
+            related_files=["agents/assignment_agent.py"],
+        )
         return {
             "intent": "general",
             "confidence": 0,
@@ -188,6 +207,14 @@ def delegate(intent: str, task_details: dict, file_path: str, emit_fn) -> dict |
 
     except Exception as e:
         logger.error(f"{agent_name} failed: {e}", exc_info=True)
+        learning_service.log_error(
+            agent=agent_name,
+            error_type="delegation_failed",
+            summary=f"{agent_name} failed during task execution",
+            error_message=str(e),
+            context=f"Intent: {intent}, Action: {task_details.get('action', 'N/A')}",
+            related_files=[f"agents/{intent}_agent.py"],
+        )
         result = {"content": f"The {agent_name} encountered an error: {str(e)}"}
 
     finally:

@@ -29,10 +29,10 @@ EXPENSE_FIELDS = {
     "pax": "Number of passengers / group size",
     "unit_price": "Price per person/unit",
     "amount": "Total expense amount (unit_price x pax)",
-    "currency": "Currency (default THB)",
+    "currency": "Detected currency (CNY, THB, USD, etc.)",
     "supplier_name": "Supplier / company name (Party A / 甲方)",
     "description": "Description of the expense (flight route, service name, etc.)",
-    "charge_type": "Type: flight, visa, meal, taxi, accommodation, tour_guide, other",
+    "charge_type": "Type: flight, land_tour, single_supplement, service_fee, guide_tip, visa, accommodation, meal, transport, insurance, entrance_fee, other",
 }
 
 
@@ -285,20 +285,50 @@ def _extract_records_with_llm(raw_text: str, file_type: str) -> dict:
 
 Also identify the **supplier name** (甲方 / Party A / the company issuing the bill).
 
-For each record, identify these fields:
-- tour_code: Tour or group code (e.g., GO1TAO5NTAOQW260304)
+## CURRENCY DETECTION (CRITICAL)
+Detect the ACTUAL currency from the document. Do NOT default to THB.
+Look for these clues:
+- "RMB", "人民币", "元", "¥", "CNY" -> currency = "CNY"
+- "THB", "บาท", "฿", "泰铢" -> currency = "THB"
+- "USD", "$", "美元", "美金" -> currency = "USD"
+- "EUR", "€", "欧元" -> currency = "EUR"
+- "JPY", "円", "日元" -> currency = "JPY"
+- "KRW", "₩", "韩元" -> currency = "KRW"
+- If the amount summary shows "(RMB)" or "元" or mentions Chinese bank accounts only -> "CNY"
+- If the supplier is a Chinese company with Chinese bank accounts -> likely "CNY"
+- Only use "THB" if explicitly stated or if the document is clearly in Thai
+
+## EXPENSE LINE ITEMS
+Extract EACH expense line item as a SEPARATE record. Common items:
+- 团费 / tour fare -> charge_type = "land_tour"
+- 单房差 / single room supplement -> charge_type = "single_supplement"
+- 服务费 / service fee -> charge_type = "service_fee"
+- 导游费 / guide fee / 小费 / tips / 导服费 -> charge_type = "guide_tip"
+- 机票 / 票价 / flight / airfare -> charge_type = "flight"
+- 签证费 / visa fee -> charge_type = "visa"
+- 酒店 / hotel / 住宿 / accommodation -> charge_type = "accommodation"
+- 餐费 / meals -> charge_type = "meal"
+- 车费 / transport / 包车 -> charge_type = "transport"
+- 保险 / insurance -> charge_type = "insurance"
+- 门票 / entrance / tickets -> charge_type = "entrance_fee"
+- If unclear, use "other"
+
+For EACH line item, extract:
+- tour_code: Tour or group code (e.g., GO1TAO5NTAOQW260304). If multiple items share the same tour code, use the SAME code for each.
 - program_code: Program code if available
 - travel_date: Travel date or date range (e.g., "0304-0309")
-- pax: Number of passengers / group size
-- unit_price: Price per person (单价)
-- amount: Total expense amount (unit_price * pax = amount)
-- currency: Currency code (default THB if not specified)
-- description: Description of the service (e.g., flight route, ticket deposit)
-- charge_type: One of: flight, visa, meal, taxi, accommodation, tour_guide, other
+- pax: Number of passengers / units for THIS line item
+- unit_price: Price per person/unit (单价)
+- amount: Total for this line (unit_price * pax). Calculate correctly from the document.
+- currency: The detected currency code (see above)
+- description: Original description text (Chinese or English as-is)
+- charge_type: Category from the list above
 
 Return ONLY valid JSON in this format:
 {{
     "supplier_name": "the company/supplier name",
+    "detected_currency": "CNY or THB or USD etc.",
+    "currency_evidence": "brief explanation of how you detected the currency",
     "records": [
         {{
             "tour_code": "string",
@@ -307,9 +337,9 @@ Return ONLY valid JSON in this format:
             "pax": number or null,
             "unit_price": number or null,
             "amount": number,
-            "currency": "THB",
+            "currency": "the detected currency",
             "description": "string",
-            "charge_type": "other"
+            "charge_type": "string from categories above"
         }}
     ],
     "notes": "any observations about the data"
@@ -317,7 +347,7 @@ Return ONLY valid JSON in this format:
 
 Document text:
 ---
-{raw_text[:4000]}
+{raw_text[:6000]}
 ---"""
 
     try:
@@ -331,22 +361,31 @@ Document text:
                 {"role": "user", "content": prompt},
             ],
             temperature=0.1,
-            max_tokens=2000,
+            max_tokens=4000,
             response_format={"type": "json_object"},
         )
 
         result = json.loads(response.choices[0].message.content)
         records = result.get("records", [])
         supplier_name = result.get("supplier_name", "")
+        detected_currency = result.get("detected_currency", "")
+        currency_evidence = result.get("currency_evidence", "")
+
+        if detected_currency:
+            logger.info("Currency detected: %s (evidence: %s)", detected_currency, currency_evidence)
 
         for rec in records:
             rec["supplier_name"] = supplier_name
+            if detected_currency and rec.get("currency") in ("THB", None, ""):
+                rec["currency"] = detected_currency
 
         return {
             "status": "success",
             "file_type": file_type,
             "extraction_method": "llm",
             "supplier_name": supplier_name,
+            "detected_currency": detected_currency,
+            "currency_evidence": currency_evidence,
             "total_rows": len(records),
             "valid_records": len(records),
             "invalid_records": 0,

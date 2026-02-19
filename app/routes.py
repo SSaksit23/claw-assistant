@@ -13,7 +13,7 @@ import json
 import logging
 from datetime import datetime
 
-from flask import Blueprint, render_template, request, jsonify
+from flask import Blueprint, render_template, request, jsonify, send_file
 from werkzeug.utils import secure_filename
 
 from config import Config
@@ -459,6 +459,21 @@ def api_callback():
         logger.warning(f"Could not broadcast callback result: {e}")
 
     return jsonify({"status": "received", "job_id": job_id})
+
+
+@main_bp.route("/api/export/<job_id>", methods=["GET"])
+def api_export_csv(job_id: str):
+    """Download the CSV report for a completed job."""
+    csv_path = os.path.join(Config.DATA_DIR, f"expenses_{job_id}.csv")
+    if not os.path.exists(csv_path):
+        return jsonify({"error": "CSV report not found for this job"}), 404
+
+    return send_file(
+        csv_path,
+        mimetype="text/csv",
+        as_attachment=True,
+        download_name=f"expenses_{job_id}.csv",
+    )
 
 
 @main_bp.route("/api/jobs/<job_id>", methods=["GET"])

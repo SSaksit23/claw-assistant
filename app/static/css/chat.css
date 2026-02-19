@@ -55,6 +55,41 @@
     overflow-x: auto;
     margin: 0.5rem 0;
 }
+.message-bubble .prose a {
+    color: #89b4fa;
+    text-decoration: underline;
+    font-weight: 600;
+    transition: color 0.15s;
+}
+.message-bubble .prose a:hover {
+    color: #b4d0fb;
+}
+.message-bubble .prose table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.8rem;
+    margin: 0.5rem 0;
+    overflow-x: auto;
+    display: block;
+}
+.message-bubble .prose th,
+.message-bubble .prose td {
+    border: 1px solid #313244;
+    padding: 0.35rem 0.5rem;
+    text-align: left;
+    white-space: nowrap;
+}
+.message-bubble .prose th {
+    background: #1e1e2e;
+    color: #cba6f7;
+    font-weight: 600;
+}
+.message-bubble .prose tr:nth-child(even) {
+    background: rgba(255,255,255,0.03);
+}
+.message-bubble .prose tr:hover {
+    background: rgba(255,255,255,0.06);
+}
 
 /* Agent status cards */
 .agent-card {

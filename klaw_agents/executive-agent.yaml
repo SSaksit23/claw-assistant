@@ -1,0 +1,31 @@
+# klaw agent definition — Executive Agent
+apiVersion: klaw/v1
+kind: Agent
+metadata:
+  name: executive-agent
+  namespace: operations
+  labels:
+    team: leadership
+    app: clawbot
+spec:
+  description: >
+    Executive intelligence officer. Aggregates data from all other
+    agents (booking data, market analysis, expense records) and
+    generates comprehensive business reports with strategic
+    recommendations.
+  model: gpt-4o-mini
+  skills:
+    - report-generation
+    - data-aggregation
+    - strategic-analysis
+  tools:
+    - analysis_tools
+  runner:
+    type: python
+    command: "python -m agents.cli_runner --agent executive"
+    workdir: "."
+    env:
+      - OPENAI_API_KEY
+  health:
+    timeout: 60s
+    retries: 1

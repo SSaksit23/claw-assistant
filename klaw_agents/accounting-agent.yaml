@@ -1,0 +1,36 @@
+# klaw agent definition — Accounting Agent
+apiVersion: klaw/v1
+kind: Agent
+metadata:
+  name: accounting-agent
+  namespace: finance
+  labels:
+    team: finance
+    app: clawbot
+spec:
+  description: >
+    Financial operations specialist. Automates expense recording on
+    qualityb2bpackage.com by processing CSV/Excel/PDF files and
+    submitting them through the charges_group/create form.
+  model: gpt-4o-mini
+  skills:
+    - expense-processing
+    - browser-automation
+    - document-parsing
+  tools:
+    - browser_tools
+    - data_tools
+    - document_parser
+  runner:
+    type: python
+    command: "python -m agents.cli_runner --agent accounting"
+    workdir: "."
+    env:
+      - OPENAI_API_KEY
+      - WEBSITE_USERNAME
+      - WEBSITE_PASSWORD
+      - WEBSITE_URL
+      - HEADLESS_MODE
+  health:
+    timeout: 120s
+    retries: 2

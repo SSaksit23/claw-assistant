@@ -1,0 +1,33 @@
+# klaw agent definition — Admin Agent
+apiVersion: klaw/v1
+kind: Agent
+metadata:
+  name: admin-agent
+  namespace: operations
+  labels:
+    team: operations
+    app: clawbot
+spec:
+  description: >
+    Administrative assistant. Lists expense records, booking records,
+    and performs system lookups on the qualityb2bpackage.com website.
+  model: gpt-4o-mini
+  skills:
+    - record-management
+    - browser-automation
+    - system-lookup
+  tools:
+    - browser_tools
+  runner:
+    type: python
+    command: "python -m agents.cli_runner --agent admin"
+    workdir: "."
+    env:
+      - OPENAI_API_KEY
+      - WEBSITE_USERNAME
+      - WEBSITE_PASSWORD
+      - WEBSITE_URL
+      - HEADLESS_MODE
+  health:
+    timeout: 90s
+    retries: 2

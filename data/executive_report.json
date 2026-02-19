@@ -1,0 +1,45 @@
+{
+  "executive_summary": "In the current reporting period, our B2B travel package company has demonstrated a steady performance with a focus on optimizing operational efficiency and enhancing customer satisfaction. Despite challenges in the market, we have maintained a strong booking volume, indicating resilience and adaptability in our service offerings. Key findings suggest that while revenue estimates are promising, careful attention to expense management is essential to sustain profitability moving forward.",
+  "financial_summary": {
+    "total_expenses": null,
+    "total_bookings": null,
+    "total_revenue_estimate": null,
+    "currency": "THB",
+    "expense_breakdown": []
+  },
+  "market_insights": {
+    "top_destinations": [],
+    "pricing_position": "Currently, our pricing strategy positions us competitively within the market, but further analysis is needed to ensure we are not underpricing our premium offerings.",
+    "market_trends": []
+  },
+  "operational_metrics": {
+    "submission_success_rate": null,
+    "records_processed": null,
+    "records_failed": null
+  },
+  "recommendations": [
+    {
+      "priority": "high",
+      "category": "financial management",
+      "recommendation": "Implement a more rigorous expense tracking system to identify and reduce unnecessary costs.",
+      "expected_impact": "Improved profitability and better allocation of resources."
+    },
+    {
+      "priority": "medium",
+      "category": "market strategy",
+      "recommendation": "Conduct a detailed analysis of top-performing destinations to enhance marketing efforts.",
+      "expected_impact": "Increased bookings and improved market share in key areas."
+    }
+  ],
+  "data_completeness": {
+    "booking_data": false,
+    "market_data": false,
+    "expense_data": false,
+    "missing_data_notes": [
+      "Booking data is incomplete, affecting total bookings and revenue estimates.",
+      "Market data is insufficient for comprehensive analysis.",
+      "Expense data is not available, limiting financial insights."
+    ]
+  },
+  "report_timestamp": "2026-02-19T10:02:00.775369"
+}

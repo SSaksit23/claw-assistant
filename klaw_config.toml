@@ -1,0 +1,65 @@
+# ─────────────────────────────────────────────────────────────
+#  klaw configuration for Web365 ClawBot
+#
+#  This config maps ClawBot's Python agents to klaw's
+#  orchestration model. klaw manages scheduling, visibility,
+#  namespace isolation, and Slack control while ClawBot agents
+#  handle the actual business logic.
+# ─────────────────────────────────────────────────────────────
+
+[defaults]
+model = "gpt-4o-mini"
+namespace = "default"
+
+# ── LLM Provider ──────────────────────────────────────────────
+# ClawBot uses OpenAI directly; klaw routes through the same key
+[provider.openai]
+api_key = "${OPENAI_API_KEY}"
+
+# ── Communication Channels ────────────────────────────────────
+[channel.cli]
+enabled = true
+
+[channel.slack]
+enabled = false                        # set true + tokens to enable
+bot_token = "${SLACK_BOT_TOKEN}"
+app_token = "${SLACK_APP_TOKEN}"
+
+# ── Namespace: Finance ────────────────────────────────────────
+# Accounting Agent and expense-related operations
+[namespace.finance]
+secrets = [
+    "OPENAI_API_KEY",
+    "WEBSITE_USERNAME",
+    "WEBSITE_PASSWORD",
+    "WEBSITE_URL",
+]
+allowed_tools = ["browser_tools", "data_tools", "document_parser"]
+
+# ── Namespace: Research ───────────────────────────────────────
+# Market Analysis Agent and Data Analysis Agent
+[namespace.research]
+secrets = [
+    "OPENAI_API_KEY",
+    "WEBSITE_USERNAME",
+    "WEBSITE_PASSWORD",
+    "WEBSITE_URL",
+    "EXA_API_KEY",
+]
+allowed_tools = ["browser_tools", "itinerary_tools", "analysis_tools"]
+
+# ── Namespace: Operations ─────────────────────────────────────
+# Admin Agent and Executive Agent
+[namespace.operations]
+secrets = [
+    "OPENAI_API_KEY",
+    "WEBSITE_USERNAME",
+    "WEBSITE_PASSWORD",
+    "WEBSITE_URL",
+]
+allowed_tools = ["browser_tools", "analysis_tools"]
+
+# ── Scheduler ─────────────────────────────────────────────────
+[scheduler]
+enabled = true
+timezone = "Asia/Bangkok"

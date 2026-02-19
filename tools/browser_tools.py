@@ -37,6 +37,7 @@ from datetime import datetime
 
 from tools.browser_manager import BrowserManager
 from config import Config
+from services import learning_service
 
 logger = logging.getLogger(__name__)
 
@@ -46,9 +47,16 @@ CHARGE_TYPE_MAP = {
     "allowance": "เบี้ยเลี้ยง (ค่าจ้างมัคคุเทศก์และหัวหน้าทัวร์)",
     "taxi": "ค่าแท็กซี่หัวหน้าทัวร์",
     "meal": "ค่าตั๋วเครื่องบิน",
-    "accommodation": "ค่าตั๋วเครื่องบิน",
+    "accommodation": "ค่าทัวร์/ค่าแลนด์",
     "tour_guide": "เบี้ยเลี้ยง (ค่าจ้างมัคคุเทศก์และหัวหน้าทัวร์)",
-    "other": "ค่าตั๋วเครื่องบิน",
+    "land_tour": "ค่าทัวร์/ค่าแลนด์",
+    "single_supplement": "ค่าทัวร์/ค่าแลนด์",
+    "service_fee": "ค่าทัวร์/ค่าแลนด์",
+    "guide_tip": "เบี้ยเลี้ยง (ค่าจ้างมัคคุเทศก์และหัวหน้าทัวร์)",
+    "transport": "ค่าแท็กซี่หัวหน้าทัวร์",
+    "insurance": "ค่าทัวร์/ค่าแลนด์",
+    "entrance_fee": "ค่าทัวร์/ค่าแลนด์",
+    "other": "ค่าทัวร์/ค่าแลนด์",
 }
 
 
@@ -111,7 +119,14 @@ async def search_program_code(group_code: str) -> dict:
 
     try:
         url = Config.TRAVEL_PACKAGE_URL
-        await page.goto(url, wait_until="domcontentloaded")
+        logger.info("Navigating to travelpackage: %s", url)
+        try:
+            await asyncio.wait_for(
+                page.goto(url, wait_until="domcontentloaded"),
+                timeout=15,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("travelpackage page.goto timed out, continuing anyway")
         await asyncio.sleep(2)
 
         search_input = await page.query_selector('#input_search')
@@ -130,21 +145,23 @@ async def search_program_code(group_code: str) -> dict:
 
             match = await _find_program_in_results(page, group_code)
             if match:
-                await manager.screenshot("travelpackage_found")
+                try:
+                    await asyncio.wait_for(manager.screenshot("travelpackage_found"), timeout=5)
+                except asyncio.TimeoutError:
+                    pass
                 logger.info(
                     "Found program code %s for group %s (searched '%s')",
                     match["program_code"], group_code, search_term,
                 )
                 return {"status": "success", **match}
 
-        await manager.screenshot("travelpackage_not_found")
         return {
             "status": "not_found",
             "message": f"No program code found for '{group_code}' (tried: {candidates})",
         }
 
     except Exception as e:
-        logger.error("Program search failed: %s", e)
+        logger.error("Program search failed: %s", e, exc_info=True)
         return {"status": "failed", "message": str(e)}
 
 
@@ -243,6 +260,14 @@ async def login(username: str = None, password: str = None, max_retries: int = 3
                 await asyncio.sleep(wait_time)
 
     await manager.screenshot("login_failed")
+    learning_service.log_error(
+        agent="Accounting Agent",
+        error_type="login_failed",
+        summary="Login to qualityb2bpackage.com failed after all retries",
+        error_message="All login attempts exhausted",
+        context="Check credentials, site availability, and network connectivity",
+        related_files=["tools/browser_tools.py", "config.py"],
+    )
     return {"status": "failed", "message": "Login failed after all retries"}
 
 
@@ -253,16 +278,34 @@ async def navigate_to_charges_form() -> dict:
 
     try:
         url = Config.CHARGES_FORM_URL
-        logger.info("Navigating to charges form: %s", url)
-        await page.goto(url, wait_until="domcontentloaded")
-        await asyncio.sleep(2)
+        logger.info("Navigating to charges form: %s (current: %s)", url, page.url)
 
+        # Dismiss any lingering dialogs/alerts that could block navigation
+        page.on("dialog", lambda d: d.accept())
+
+        try:
+            await asyncio.wait_for(
+                page.goto(url, wait_until="domcontentloaded"),
+                timeout=20,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("page.goto timed out after 20s, checking if page loaded anyway...")
+            current_url = page.url
+            if "charges_group" in current_url:
+                logger.info("Page DID navigate to %s despite timeout", current_url)
+            else:
+                logger.warning("Page still at %s, trying direct JS navigation", current_url)
+                await page.evaluate(f"window.location.href = '{url}'")
+                await asyncio.sleep(5)
+
+        await asyncio.sleep(2)
         title = await page.title()
+        logger.info("Charges form page loaded: title='%s' url='%s'", title, page.url)
         await manager.screenshot("charges_form_loaded")
         return {"status": "success", "message": "Navigated to charges form", "title": title}
 
     except Exception as e:
-        logger.error("Navigation failed: %s", e)
+        logger.error("Navigation failed: %s", e, exc_info=True)
         await manager.screenshot("navigation_failed")
         return {"status": "failed", "message": str(e)}
 
@@ -285,6 +328,26 @@ async def set_date_range(start_date: str, end_date: str) -> dict:
         return {"status": "failed", "message": str(e)}
 
 
+async def _dismiss_overlays(page):
+    """Click body to dismiss any datepicker popups or dropdown overlays."""
+    try:
+        await page.evaluate("""
+        (function() {
+            // Close any open Bootstrap datepickers
+            var dps = document.querySelectorAll('.datepicker');
+            dps.forEach(function(dp) { dp.style.display = 'none'; });
+            // Close any open Bootstrap select dropdowns
+            var opens = document.querySelectorAll('.bootstrap-select.open');
+            opens.forEach(function(el) { el.classList.remove('open'); });
+            // Click body to dismiss misc popups
+            document.body.click();
+        })()
+        """)
+        await asyncio.sleep(0.3)
+    except Exception:
+        pass
+
+
 async def select_program_and_tour(
     program_name: str = None,
     tour_code: str = None,
@@ -304,29 +367,55 @@ async def select_program_and_tour(
     try:
         # Set date range first so the correct programs appear
         if date_from and date_to:
-            logger.info("Setting date range: %s - %s", date_from, date_to)
+            logger.info("select_program_and_tour: setting date range %s - %s", date_from, date_to)
             await _set_input_value(page, 'input[name="start"]', date_from)
             await _set_input_value(page, 'input[name="end"]', date_to)
-            await asyncio.sleep(3)
+            await asyncio.sleep(1)
+            # Dismiss any datepicker popup the date input might have triggered
+            await _dismiss_overlays(page)
+            logger.info("select_program_and_tour: date range set, overlays dismissed")
+            await asyncio.sleep(2)
 
         # Select program (populates the tour/period dropdown via AJAX)
         if program_name:
-            logger.info("Selecting program: %s", program_name)
-            await _select_bootstrap_option(page, 'select[name="package"]', program_name)
-            await asyncio.sleep(4)  # AJAX loads tour codes for selected program
+            logger.info("select_program_and_tour: selecting program %s", program_name)
+            try:
+                await asyncio.wait_for(
+                    _select_bootstrap_option(page, 'select[name="package"]', program_name),
+                    timeout=15,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("select_program_and_tour: program dropdown timed out, JS fallback")
+                await _js_select_option(page, 'select[name="package"]', program_name)
+            await _dismiss_overlays(page)
+            await asyncio.sleep(4)
 
         # Select tour code from the period dropdown
         if tour_code:
-            logger.info("Selecting tour code: %s", tour_code)
-            await _select_bootstrap_option(page, 'select[name="period"]', tour_code)
+            logger.info("select_program_and_tour: selecting tour code %s", tour_code)
+            try:
+                await asyncio.wait_for(
+                    _select_bootstrap_option(page, 'select[name="period"]', tour_code),
+                    timeout=15,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("select_program_and_tour: period dropdown timed out, JS fallback")
+                await _js_select_option(page, 'select[name="period"]', tour_code)
             await asyncio.sleep(1)
 
-        await manager.screenshot("program_selected")
+        logger.info("select_program_and_tour: done, taking screenshot")
+        try:
+            await asyncio.wait_for(manager.screenshot("program_selected"), timeout=5)
+        except asyncio.TimeoutError:
+            logger.warning("Screenshot timed out, continuing")
         return {"status": "success", "message": f"Selected program={program_name}, tour={tour_code}"}
 
     except Exception as e:
         logger.error("Program/tour selection failed: %s", e)
-        await manager.screenshot("selection_failed")
+        try:
+            await asyncio.wait_for(manager.screenshot("selection_failed"), timeout=5)
+        except asyncio.TimeoutError:
+            pass
         return {"status": "failed", "message": str(e)}
 
 
@@ -351,12 +440,19 @@ async def fill_expense_form(
     try:
         today = datetime.now().strftime("%d/%m/%Y")
 
+        # Wait for page to settle after AJAX tour selection
+        logger.info("fill_expense_form: waiting for page to settle...")
+        await asyncio.sleep(2)
+        await _dismiss_overlays(page)
+
         # Payment date
+        logger.info("fill_expense_form: setting payment_date")
         await _set_input_value(page, 'input[name="payment_date"]', payment_date or today)
 
         # Receipt date (try multiple possible selectors)
         receipt_sel = await page.query_selector('input[name="receipt_date"]')
         if receipt_sel:
+            logger.info("fill_expense_form: setting receipt_date")
             await _set_input_value(page, 'input[name="receipt_date"]', receipt_date or today)
 
         # Receipt number
@@ -366,21 +462,47 @@ async def fill_expense_form(
                 await receipt_no_el.fill(str(receipt_number))
 
         # Description (array field for dynamic rows)
+        logger.info("fill_expense_form: setting description")
         desc_el = await page.query_selector('input[name="description[]"]')
         if desc_el:
             await desc_el.fill(description)
+        else:
+            logger.warning("fill_expense_form: description[] not found, trying JS fallback")
+            await page.evaluate("""
+                var el = document.querySelector('input[name="description[]"]');
+                if (el) { el.value = arguments[0]; el.dispatchEvent(new Event('change', {bubbles:true})); }
+            """)
 
-        # Charge type dropdown
+        # Charge type dropdown — use JS fallback with timeout
+        logger.info("fill_expense_form: setting charge_type")
         mapped_type = CHARGE_TYPE_MAP.get(charge_type, CHARGE_TYPE_MAP["flight"])
-        await _select_bootstrap_option(page, 'select[name="rate_type[]"]', mapped_type)
+        try:
+            await asyncio.wait_for(
+                _select_bootstrap_option(page, 'select[name="rate_type[]"]', mapped_type),
+                timeout=10,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("fill_expense_form: rate_type dropdown timed out, using JS fallback")
+            await _js_select_option(page, 'select[name="rate_type[]"]', mapped_type)
 
         # Amount
+        logger.info("fill_expense_form: setting amount=%s", amount)
         amount_el = await page.query_selector('input[name="price[]"]')
         if amount_el:
             await amount_el.fill(str(amount))
+        else:
+            logger.warning("fill_expense_form: price[] not found")
 
-        # Currency
-        await _select_bootstrap_option(page, '#currency', currency)
+        # Currency — use JS fallback with timeout
+        logger.info("fill_expense_form: setting currency=%s", currency)
+        try:
+            await asyncio.wait_for(
+                _select_bootstrap_option(page, '#currency', currency),
+                timeout=10,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("fill_expense_form: currency dropdown timed out, using JS fallback")
+            await _js_select_option(page, '#currency', currency)
 
         # Exchange rate
         if exchange_rate != 1.0:
@@ -394,13 +516,199 @@ async def fill_expense_form(
             if remark_el:
                 await remark_el.fill(remark)
 
-        await manager.screenshot("form_filled")
+        logger.info("fill_expense_form: all fields set, taking screenshot")
+        try:
+            await asyncio.wait_for(manager.screenshot("form_filled"), timeout=5)
+        except asyncio.TimeoutError:
+            pass
         return {"status": "success", "message": f"Form filled: {description}, {amount} {currency}"}
 
     except Exception as e:
         logger.error("Form filling failed: %s", e)
-        await manager.screenshot("form_fill_failed")
+        try:
+            await asyncio.wait_for(manager.screenshot("form_fill_failed"), timeout=5)
+        except asyncio.TimeoutError:
+            pass
         return {"status": "failed", "message": str(e)}
+
+
+async def _add_expense_row(page) -> bool:
+    """Click the 'add row' button to create a new expense line item row."""
+    result = await page.evaluate("""
+    (function() {
+        // Look for common "add row" buttons
+        var selectors = [
+            'a.addDetail', '.addDetail', 'a.add-row', '.add-row',
+            'button.addDetail', 'a[onclick*="addDetail"]',
+            'a.btn-add-row', '.btn-add-detail',
+            'a:has(i.fa-plus)', 'button:has(i.fa-plus)',
+        ];
+        for (var s of selectors) {
+            var btn = document.querySelector(s);
+            if (btn) {
+                btn.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                btn.click();
+                return 'CLICKED:' + s;
+            }
+        }
+        // Fallback: look for any link/button with "เพิ่ม" (add) in text that's near expense rows
+        var links = document.querySelectorAll('a, button');
+        for (var l of links) {
+            var txt = l.textContent.trim();
+            if ((txt.includes('เพิ่ม') || txt.includes('+')) &&
+                !txt.includes('บริษัท') && l.offsetParent !== null) {
+                l.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                l.click();
+                return 'CLICKED_TEXT:' + txt.substring(0, 40);
+            }
+        }
+        return 'NOT_FOUND';
+    })()
+    """)
+    logger.info("_add_expense_row: %s", result)
+    await asyncio.sleep(1)
+    return result != "NOT_FOUND"
+
+
+async def fill_expense_rows(
+    rows: list[dict],
+    payment_date: str = None,
+) -> dict:
+    """
+    Fill the expense section on /charges_group/create.
+
+    Combines all line items into a single form row with the TOTAL amount
+    and a detailed breakdown in the description and remark fields.
+    This is more reliable than trying to add multiple rows to the form.
+    """
+    manager = BrowserManager.get_instance()
+    page = await manager.get_page()
+
+    if not rows:
+        return {"status": "failed", "message": "No rows to fill"}
+
+    today = datetime.now().strftime("%d/%m/%Y")
+    currency = rows[0].get("currency", "THB")
+    exchange_rate = rows[0].get("exchange_rate", 1.0)
+
+    # Calculate total amount across all line items
+    total_amount = sum(r.get("amount", 0) for r in rows)
+
+    # Build combined description with line item breakdown
+    desc_parts = []
+    for r in rows:
+        desc = r.get("description", "")
+        amt = r.get("amount", 0)
+        pax = r.get("pax")
+        up = r.get("unit_price")
+        if pax and up:
+            desc_parts.append(f"{desc}: {up}x{pax}={amt:,.0f}")
+        else:
+            desc_parts.append(f"{desc}: {amt:,.0f}")
+    combined_desc = " / ".join(desc_parts)
+
+    # Determine primary charge type (from the largest amount item)
+    primary_row = max(rows, key=lambda r: r.get("amount", 0))
+    primary_charge_type = primary_row.get("charge_type", "other")
+
+    logger.info("fill_expense_rows: %d items, total=%s %s, desc=%s",
+                len(rows), total_amount, currency, combined_desc[:80])
+
+    try:
+        await asyncio.sleep(1)
+        await _dismiss_overlays(page)
+
+        # Payment date
+        logger.info("fill_expense_rows: setting payment_date")
+        await _set_input_value(page, 'input[name="payment_date"]', payment_date or today)
+
+        # Receipt date
+        receipt_sel = await page.query_selector('input[name="receipt_date"]')
+        if receipt_sel:
+            await _set_input_value(page, 'input[name="receipt_date"]', payment_date or today)
+
+        # Description — combined breakdown
+        logger.info("fill_expense_rows: setting description")
+        desc_el = await page.query_selector('input[name="description[]"]')
+        if desc_el:
+            await desc_el.fill(combined_desc)
+        else:
+            logger.warning("fill_expense_rows: description[] not found")
+
+        # Charge type dropdown
+        logger.info("fill_expense_rows: setting charge_type=%s", primary_charge_type)
+        mapped_type = CHARGE_TYPE_MAP.get(primary_charge_type, CHARGE_TYPE_MAP.get("other", "ค่าทัวร์/ค่าแลนด์"))
+        try:
+            await asyncio.wait_for(
+                _select_bootstrap_option(page, 'select[name="rate_type[]"]', mapped_type),
+                timeout=10,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("fill_expense_rows: rate_type dropdown timed out, JS fallback")
+            await _js_select_option(page, 'select[name="rate_type[]"]', mapped_type)
+
+        # Amount — TOTAL of all line items
+        logger.info("fill_expense_rows: setting TOTAL amount=%s", total_amount)
+        price_el = await page.query_selector('input[name="price[]"]')
+        if price_el:
+            await price_el.fill(str(total_amount))
+        else:
+            logger.warning("fill_expense_rows: price[] not found")
+
+        # Currency
+        logger.info("fill_expense_rows: setting currency=%s", currency)
+        try:
+            await asyncio.wait_for(
+                _select_bootstrap_option(page, '#currency', currency),
+                timeout=10,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("fill_expense_rows: currency dropdown timed out, JS fallback")
+            await _js_select_option(page, '#currency', currency)
+
+        # Exchange rate
+        if exchange_rate != 1.0:
+            rate_el = await page.query_selector('input[name="rate"]')
+            if rate_el:
+                await rate_el.fill(str(exchange_rate))
+
+        # Remark — detailed breakdown
+        remark_text = rows[0].get("remark", "")
+        if remark_text:
+            remark_el = await page.query_selector('textarea[name="remark"]')
+            if remark_el:
+                await remark_el.fill(remark_text)
+
+        logger.info("fill_expense_rows: done, total=%s %s (%d items combined)",
+                    total_amount, currency, len(rows))
+        try:
+            await asyncio.wait_for(manager.screenshot("expense_rows_filled"), timeout=5)
+        except asyncio.TimeoutError:
+            pass
+
+        return {
+            "status": "success",
+            "message": f"Filled expense: {total_amount:,.0f} {currency} ({len(rows)} items combined)",
+            "rows_filled": [{"description": combined_desc, "amount": total_amount, "charge_type": primary_charge_type}],
+            "total_amount": total_amount,
+        }
+
+    except Exception as e:
+        logger.error("fill_expense_rows failed: %s", e, exc_info=True)
+        learning_service.log_error(
+            agent="Accounting Agent",
+            error_type="form_fill_failed",
+            summary=f"fill_expense_rows failed: {len(rows)} items, total={total_amount}",
+            error_message=str(e),
+            context=f"Items: {len(rows)}, Total: {total_amount} {currency}",
+            suggested_fix="Check form selectors and bootstrap dropdown state",
+            related_files=["tools/browser_tools.py"],
+        )
+        try:
+            await asyncio.wait_for(manager.screenshot("expense_rows_failed"), timeout=5)
+        except asyncio.TimeoutError:
+            pass
+        return {"status": "failed", "message": str(e), "rows_filled": []}
 
 
 async def click_add_company_expense() -> dict:
@@ -426,7 +734,10 @@ async def click_add_company_expense() -> dict:
             return {"status": "failed", "message": "addChargesCompany button not found"}
 
         await asyncio.sleep(2)
-        await manager.screenshot("company_section_opened")
+        try:
+            await asyncio.wait_for(manager.screenshot("company_section_opened"), timeout=5)
+        except asyncio.TimeoutError:
+            pass
         return {"status": "success", "message": "Company expense section opened"}
 
     except Exception as e:
@@ -469,25 +780,44 @@ async def fill_company_expense(
     try:
         today = datetime.now().strftime("%d/%m/%Y")
 
+        await _dismiss_overlays(page)
+
         # Company dropdown
         if company_name:
-            await _select_bootstrap_option(
-                page,
-                'select[name="charges[id_company_charges_agent]"]',
-                company_name,
-            )
+            logger.info("fill_company_expense: setting company=%s", company_name)
+            try:
+                await asyncio.wait_for(
+                    _select_bootstrap_option(
+                        page,
+                        'select[name="charges[id_company_charges_agent]"]',
+                        company_name,
+                    ),
+                    timeout=10,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("fill_company_expense: company dropdown timed out, JS fallback")
+                await _js_select_option(page, 'select[name="charges[id_company_charges_agent]"]', company_name)
             await asyncio.sleep(1)
 
         # Payment method dropdown
         if payment_method:
-            await _select_bootstrap_option(
-                page,
-                'select[name="charges[payment_type]"]',
-                payment_method,
-            )
+            logger.info("fill_company_expense: setting payment_method=%s", payment_method)
+            try:
+                await asyncio.wait_for(
+                    _select_bootstrap_option(
+                        page,
+                        'select[name="charges[payment_type]"]',
+                        payment_method,
+                    ),
+                    timeout=10,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("fill_company_expense: payment method dropdown timed out, JS fallback")
+                await _js_select_option(page, 'select[name="charges[payment_type]"]', payment_method)
 
         # Pay to (supplier name)
         if supplier_name:
+            logger.info("fill_company_expense: setting supplier=%s", supplier_name[:50])
             pay_el = await page.query_selector('input[name="pay_name"]')
             if pay_el:
                 await pay_el.fill(supplier_name)
@@ -500,6 +830,7 @@ async def fill_company_expense(
 
         # Amount
         if amount:
+            logger.info("fill_company_expense: setting amount=%s", amount)
             amt_el = await page.query_selector('input[name="charges[amount]"]')
             if amt_el:
                 await amt_el.fill(str(amount))
@@ -512,18 +843,29 @@ async def fill_company_expense(
 
         # Payment date
         pay_date_val = payment_date or today
+        logger.info("fill_company_expense: setting pay_date=%s", pay_date_val)
         await _set_input_value(page, 'input[name="charges[pay_date]"]', pay_date_val)
+        await _dismiss_overlays(page)
 
         # Payment type dropdown
         if payment_type:
-            await _select_bootstrap_option(
-                page,
-                'select[name="charges[id_company_charges_type]"]',
-                payment_type,
-            )
+            logger.info("fill_company_expense: setting payment_type=%s", payment_type)
+            try:
+                await asyncio.wait_for(
+                    _select_bootstrap_option(
+                        page,
+                        'select[name="charges[id_company_charges_type]"]',
+                        payment_type,
+                    ),
+                    timeout=10,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("fill_company_expense: payment type dropdown timed out, JS fallback")
+                await _js_select_option(page, 'select[name="charges[id_company_charges_type]"]', payment_type)
 
         # Period
         if period:
+            logger.info("fill_company_expense: setting period=%s", period)
             period_el = await page.query_selector('input[name="charges[remark_period]"]')
             if period_el:
                 await period_el.fill(period)
@@ -534,7 +876,11 @@ async def fill_company_expense(
             if remark_el:
                 await remark_el.fill(remark)
 
-        await manager.screenshot("company_expense_filled")
+        logger.info("fill_company_expense: done, taking screenshot")
+        try:
+            await asyncio.wait_for(manager.screenshot("company_expense_filled"), timeout=5)
+        except asyncio.TimeoutError:
+            pass
         return {
             "status": "success",
             "message": f"Company expense filled: {supplier_name}, {amount}",
@@ -542,7 +888,10 @@ async def fill_company_expense(
 
     except Exception as e:
         logger.error("Company expense fill failed: %s", e)
-        await manager.screenshot("company_expense_failed")
+        try:
+            await asyncio.wait_for(manager.screenshot("company_expense_failed"), timeout=5)
+        except asyncio.TimeoutError:
+            pass
         return {"status": "failed", "message": str(e)}
 
 
@@ -573,14 +922,28 @@ async def submit_form() -> dict:
         if not clicked:
             return {"status": "failed", "message": "Could not find submit button"}
 
-        await page.wait_for_load_state("domcontentloaded")
+        logger.info("submit_form: clicked submit, waiting for page load...")
+        try:
+            await asyncio.wait_for(
+                page.wait_for_load_state("domcontentloaded"),
+                timeout=15,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("submit_form: domcontentloaded timed out, continuing")
         await asyncio.sleep(3)
-        await manager.screenshot("form_submitted")
+        logger.info("submit_form: done")
+        try:
+            await asyncio.wait_for(manager.screenshot("form_submitted"), timeout=5)
+        except asyncio.TimeoutError:
+            pass
         return {"status": "success", "message": "Form submitted"}
 
     except Exception as e:
         logger.error("Form submission failed: %s", e)
-        await manager.screenshot("submit_failed")
+        try:
+            await asyncio.wait_for(manager.screenshot("submit_failed"), timeout=5)
+        except asyncio.TimeoutError:
+            pass
         return {"status": "failed", "message": str(e)}
 
 
@@ -673,6 +1036,32 @@ async def scrape_table_data(page=None) -> list:
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+async def _js_select_option(page, selector: str, value: str):
+    """Select an <option> by value using pure JS — reliable fallback when Bootstrap dropdown hangs."""
+    safe_val = value.replace("\\", "\\\\").replace("'", "\\'")
+    safe_sel = selector.replace("\\", "\\\\").replace("'", "\\'")
+    result = await page.evaluate(f"""
+    (function() {{
+        var sel = document.querySelector('{safe_sel}');
+        if (!sel) return 'not_found';
+        for (var i = 0; i < sel.options.length; i++) {{
+            if (sel.options[i].value === '{safe_val}' || sel.options[i].text.indexOf('{safe_val}') >= 0) {{
+                sel.selectedIndex = i;
+                sel.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                // Also refresh Bootstrap selectpicker if present
+                if (typeof jQuery !== 'undefined' && jQuery(sel).selectpicker) {{
+                    jQuery(sel).selectpicker('refresh');
+                }}
+                return 'selected:' + sel.options[i].text;
+            }}
+        }}
+        return 'no_match';
+    }})()
+    """)
+    logger.info("JS select %s -> %s (value=%s)", selector, result, value)
+    return result
+
 
 async def _set_input_value(page, selector: str, value: str):
     """Set an input's value via JS (works for date pickers that block .fill())."""

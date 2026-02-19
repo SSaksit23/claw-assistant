@@ -15,24 +15,28 @@ from config import Config
 logger = logging.getLogger(__name__)
 
 
-async def _manage_records(action: str, params: dict, emit_fn=None) -> dict:
+async def _manage_records(action: str, params: dict, emit_fn=None,
+                          session_id: str = "default",
+                          website_username: str = None,
+                          website_password: str = None) -> dict:
     """Perform administrative record management tasks."""
 
-    # Login first
     if emit_fn:
         emit_fn("agent_progress", {
             "agent": "Admin Agent",
             "message": "Logging into the system...",
         })
 
-    login_result = await browser_tools.login()
+    login_result = await browser_tools.login(
+        username=website_username, password=website_password, session_id=session_id,
+    )
     if login_result["status"] != "success":
         return {
             "content": f"Login failed: {login_result['message']}",
             "data": None,
         }
 
-    manager = BrowserManager.get_instance()
+    manager = BrowserManager.get_instance(session_id)
     page = await manager.get_page()
     results = {}
 
@@ -114,17 +118,23 @@ async def _manage_records(action: str, params: dict, emit_fn=None) -> dict:
         results = {"action": action, "status": "failed", "error": str(e)}
 
     finally:
-        await browser_tools.close_browser()
+        await browser_tools.close_browser(session_id=session_id)
 
     return {"content": summary, "data": results}
 
 
-def handle_admin_task(task_details: dict, emit_fn=None) -> dict:
-    """
-    Entry point called by the Assignment Agent.
-    """
+def handle_admin_task(task_details: dict, emit_fn=None,
+                      session_id: str = "default",
+                      website_username: str = None,
+                      website_password: str = None) -> dict:
+    """Entry point called by the Assignment Agent."""
     action = task_details.get("action", "help")
     params = task_details.get("parameters", {})
 
-    result = run_async(_manage_records(action, params, emit_fn))
+    result = run_async(_manage_records(
+        action, params, emit_fn,
+        session_id=session_id,
+        website_username=website_username,
+        website_password=website_password,
+    ))
     return result

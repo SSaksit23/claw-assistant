@@ -3,6 +3,7 @@
 import os
 import sys
 import logging
+from datetime import timedelta
 from logging.handlers import RotatingFileHandler
 
 from flask import Flask
@@ -17,6 +18,12 @@ def create_app():
 
     app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "web365-clawbot-secret-key")
     app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16 MB upload limit
+
+    app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=8)
+    app.config["SESSION_COOKIE_HTTPONLY"] = True
+    app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+    is_production = os.getenv("FLASK_ENV", "production") == "production"
+    app.config["SESSION_COOKIE_SECURE"] = is_production
 
     _configure_logging(app)
 

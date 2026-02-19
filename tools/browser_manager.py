@@ -1,21 +1,23 @@
 """
-Singleton Browser Manager for Playwright.
+Per-Session Browser Manager for Playwright.
 
-Manages a single browser instance shared across all agents to avoid
-re-authentication overhead. Supports headless/headed mode, screenshots,
-and cookie/session persistence.
+Manages a pool of browser instances keyed by session ID, so each
+logged-in user gets their own isolated Chromium instance and login state.
+
+Features:
+- Per-session browser lifecycle (create / reuse / destroy)
+- Idle timeout auto-cleanup (default 30 min)
+- Max concurrent browser limit (default 10) to prevent OOM
+- LRU eviction when the pool is full
 
 IMPORTANT: Playwright uses asyncio internally. Eventlet monkey-patches
 the standard library (socket, select, threading) in ways that break
 asyncio.  Therefore all Playwright work MUST run in a REAL OS thread
 with an unpatched asyncio event loop.
-
-We obtain the *original* (unpatched) threading module via
-eventlet.patcher.original() so that our ThreadPoolExecutor creates
-actual OS threads, not eventlet green threads.
 """
 
 import os
+import time
 import asyncio
 import logging
 import threading
@@ -24,8 +26,6 @@ from typing import Optional
 
 from config import Config
 
-# Get the REAL (unpatched) threading module so we can spawn actual OS
-# threads even after eventlet.monkey_patch(thread=True).
 try:
     from eventlet.patcher import original as _original
     _real_threading = _original("threading")
@@ -34,40 +34,107 @@ except Exception:
 
 logger = logging.getLogger(__name__)
 
-_thread_lock = threading.Lock()
+_pool_lock = threading.Lock()
 
 
 class BrowserManager:
     """
-    Singleton that manages the Playwright browser lifecycle.
+    Per-session browser manager.  Each user session gets its own instance.
 
-    Usage (sync, from any greenlet):
-        result = run_in_thread(some_async_playwright_function())
+    Usage:
+        manager = BrowserManager.get_instance(session_id)
+        page = await manager.get_page()
     """
 
-    _instance: Optional["BrowserManager"] = None
+    _instances: dict[str, "BrowserManager"] = {}
+    _last_access: dict[str, float] = {}
 
-    def __init__(self):
+    MAX_INSTANCES = int(os.getenv("MAX_BROWSER_INSTANCES", "10"))
+    IDLE_TIMEOUT = int(os.getenv("BROWSER_IDLE_TIMEOUT", "1800"))  # 30 min
+
+    def __init__(self, session_id: str):
+        self._session_id = session_id
         self._playwright = None
         self._browser = None
         self._context = None
         self._page = None
         self._logged_in = False
 
+    # ------------------------------------------------------------------
+    # Pool management
+    # ------------------------------------------------------------------
     @classmethod
-    def get_instance(cls) -> "BrowserManager":
-        with _thread_lock:
-            if cls._instance is None:
-                cls._instance = cls()
-            return cls._instance
+    def get_instance(cls, session_id: str = "default") -> "BrowserManager":
+        to_close: list["BrowserManager"] = []
 
+        with _pool_lock:
+            now = time.time()
+
+            expired = [
+                sid for sid, ts in cls._last_access.items()
+                if now - ts > cls.IDLE_TIMEOUT
+            ]
+            for sid in expired:
+                inst = cls._instances.pop(sid, None)
+                cls._last_access.pop(sid, None)
+                if inst:
+                    to_close.append(inst)
+                    logger.info("Evicting idle browser: session=%s", sid)
+
+            if session_id not in cls._instances:
+                if len(cls._instances) >= cls.MAX_INSTANCES:
+                    oldest_sid = min(cls._last_access, key=cls._last_access.get)
+                    inst = cls._instances.pop(oldest_sid, None)
+                    cls._last_access.pop(oldest_sid, None)
+                    if inst:
+                        to_close.append(inst)
+                        logger.info("Evicting LRU browser: session=%s", oldest_sid)
+                cls._instances[session_id] = cls(session_id)
+
+            cls._last_access[session_id] = now
+            result = cls._instances[session_id]
+
+        for inst in to_close:
+            _close_sync(inst)
+
+        return result
+
+    @classmethod
+    def destroy_instance(cls, session_id: str):
+        """Remove and close a specific session's browser (async context)."""
+        with _pool_lock:
+            inst = cls._instances.pop(session_id, None)
+            cls._last_access.pop(session_id, None)
+        if inst:
+            logger.info("Destroying browser for session=%s", session_id)
+            return inst.close()
+        return _noop_coro()
+
+    @classmethod
+    def schedule_destroy(cls, session_id: str):
+        """Remove and close a session's browser from a sync/eventlet context."""
+        with _pool_lock:
+            inst = cls._instances.pop(session_id, None)
+            cls._last_access.pop(session_id, None)
+        if inst:
+            logger.info("Scheduling browser destroy for session=%s", session_id)
+            _close_sync(inst)
+
+    @classmethod
+    def active_count(cls) -> int:
+        with _pool_lock:
+            return len(cls._instances)
+
+    # ------------------------------------------------------------------
+    # Browser lifecycle (per instance)
+    # ------------------------------------------------------------------
     async def _ensure_browser(self):
         if self._browser and self._browser.is_connected():
             return
 
         from playwright.async_api import async_playwright
 
-        logger.info("Starting Playwright browser...")
+        logger.info("Starting browser for session=%s", self._session_id)
         self._playwright = await async_playwright().start()
         self._browser = await self._playwright.chromium.launch(
             headless=Config.HEADLESS_MODE,
@@ -83,7 +150,11 @@ class BrowserManager:
         )
         self._page = await self._context.new_page()
         self._page.set_default_timeout(Config.BROWSER_TIMEOUT)
-        logger.info("Browser started (headless=%s)", Config.HEADLESS_MODE)
+        logger.info(
+            "Browser started for session=%s (headless=%s, pool=%d/%d)",
+            self._session_id, Config.HEADLESS_MODE,
+            len(self._instances), self.MAX_INSTANCES,
+        )
 
     async def get_page(self):
         await self._ensure_browser()
@@ -99,7 +170,7 @@ class BrowserManager:
 
     async def screenshot(self, name: str = "screenshot") -> str:
         os.makedirs("logs", exist_ok=True)
-        path = f"logs/{name}.png"
+        path = f"logs/{name}_{self._session_id}.png"
         if self._page:
             await self._page.screenshot(path=path, full_page=True)
             logger.debug("Screenshot saved: %s", path)
@@ -116,19 +187,35 @@ class BrowserManager:
             if self._playwright:
                 await self._playwright.stop()
         except Exception as e:
-            logger.warning("Error closing browser: %s", e)
+            logger.warning("Error closing browser for session=%s: %s", self._session_id, e)
         finally:
             self._page = None
             self._context = None
             self._browser = None
             self._playwright = None
             self._logged_in = False
-            BrowserManager._instance = None
-            logger.info("Browser closed")
+            logger.info("Browser closed for session=%s", self._session_id)
 
     async def reset(self):
         await self.close()
         await self._ensure_browser()
+
+
+# ------------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------------
+async def _noop_coro():
+    pass
+
+
+def _close_sync(instance: BrowserManager):
+    """Close a BrowserManager from a synchronous context using a real OS thread."""
+    try:
+        loop = asyncio.new_event_loop()
+        loop.run_until_complete(instance.close())
+        loop.close()
+    except Exception as e:
+        logger.warning("Error in sync close for session=%s: %s", instance._session_id, e)
 
 
 def run_in_thread(coro):
@@ -157,8 +244,6 @@ def run_in_thread(coro):
     t = _real_threading.Thread(target=_worker, daemon=True)
     t.start()
 
-    # Poll for thread completion, yielding to eventlet so the
-    # WebSocket heartbeat loop is never starved.
     import eventlet
     while t.is_alive():
         eventlet.sleep(0.2)

@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login - Web365 ClawBot</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        primary: { 50:'#eff6ff',100:'#dbeafe',200:'#bfdbfe',300:'#93c5fd',400:'#60a5fa',500:'#3b82f6',600:'#2563eb',700:'#1d4ed8',800:'#1e40af',900:'#1e3a8a' },
+                        dark: { 800:'#1e1e2e',900:'#11111b',700:'#313244',600:'#45475a' }
+                    }
+                }
+            }
+        }
+    </script>
+</head>
+<body class="dark bg-dark-900 text-gray-100 min-h-screen flex items-center justify-center p-4">
+
+    <div class="w-full max-w-md">
+        <div class="text-center mb-8">
+            <div class="w-16 h-16 rounded-2xl bg-primary-600 flex items-center justify-center font-bold text-2xl mx-auto mb-4">C</div>
+            <h1 class="text-2xl font-bold">Web365 ClawBot</h1>
+            <p class="text-gray-400 mt-1">Multi-Agent System</p>
+        </div>
+
+        <div class="bg-dark-800 rounded-2xl border border-dark-700 p-8">
+            <h2 class="text-lg font-semibold mb-1">Sign in</h2>
+            <p class="text-sm text-gray-400 mb-6">Enter your qualityb2bpackage.com credentials</p>
+
+            {% if error %}
+            <div class="bg-red-900/30 border border-red-700 text-red-300 rounded-lg px-4 py-3 mb-4 text-sm">
+                {{ error }}
+            </div>
+            {% endif %}
+
+            <form method="POST" action="{{ url_for('main.login') }}" class="space-y-4">
+                <div>
+                    <label for="username" class="block text-sm font-medium text-gray-300 mb-1.5">Website Username</label>
+                    <input type="text" id="username" name="username" required autocomplete="username"
+                        class="w-full bg-dark-700 border border-dark-600 rounded-xl px-4 py-3 text-gray-100 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-all"
+                        placeholder="Your qualityb2bpackage.com username">
+                </div>
+
+                <div>
+                    <label for="password" class="block text-sm font-medium text-gray-300 mb-1.5">Website Password</label>
+                    <input type="password" id="password" name="password" required autocomplete="current-password"
+                        class="w-full bg-dark-700 border border-dark-600 rounded-xl px-4 py-3 text-gray-100 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-all"
+                        placeholder="Your qualityb2bpackage.com password">
+                </div>
+
+                <button type="submit"
+                    class="w-full bg-primary-600 hover:bg-primary-700 text-white font-semibold rounded-xl px-4 py-3 transition-colors focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 focus:ring-offset-dark-800">
+                    Sign in
+                </button>
+            </form>
+        </div>
+
+        <p class="text-center text-xs text-gray-500 mt-6">
+            Your credentials are stored in an encrypted session cookie and are never saved to disk.
+        </p>
+    </div>
+
+</body>
+</html>

@@ -22,9 +22,10 @@ logger = logging.getLogger(__name__)
 client = OpenAI(api_key=Config.OPENAI_API_KEY)
 
 
-async def _scrape_travel_packages(destination: Optional[str] = None, emit_fn=None) -> dict:
+async def _scrape_travel_packages(destination: Optional[str] = None, emit_fn=None,
+                                   session_id: str = "default") -> dict:
     """Scrape travel package catalog from /travelpackage."""
-    manager = BrowserManager.get_instance()
+    manager = BrowserManager.get_instance(session_id)
     page = await manager.get_page()
 
     try:
@@ -127,27 +128,29 @@ Provide a comprehensive market analysis in JSON format:
         }
 
 
-async def _run_market_analysis(destination: Optional[str] = None, emit_fn=None) -> dict:
+async def _run_market_analysis(destination: Optional[str] = None, emit_fn=None,
+                               session_id: str = "default",
+                               website_username: str = None,
+                               website_password: str = None) -> dict:
     """Run the complete market analysis workflow."""
-    # Login first
     if emit_fn:
         emit_fn("agent_progress", {
             "agent": "Market Analysis Agent",
             "message": "Logging in...",
         })
 
-    login_result = await browser_tools.login()
+    login_result = await browser_tools.login(
+        username=website_username, password=website_password, session_id=session_id,
+    )
     if login_result["status"] != "success":
         return {
             "content": f"Login failed: {login_result['message']}",
             "data": None,
         }
 
-    # Scrape packages
-    packages_result = await _scrape_travel_packages(destination, emit_fn)
+    packages_result = await _scrape_travel_packages(destination, emit_fn, session_id=session_id)
 
-    # Close browser
-    await browser_tools.close_browser()
+    await browser_tools.close_browser(session_id=session_id)
 
     if packages_result["status"] != "success" or not packages_result["data"]:
         return {
@@ -208,12 +211,18 @@ async def _run_market_analysis(destination: Optional[str] = None, emit_fn=None) 
     return {"content": summary, "data": full_result}
 
 
-def handle_market_analysis_task(task_details: dict, emit_fn=None) -> dict:
-    """
-    Entry point called by the Assignment Agent.
-    """
+def handle_market_analysis_task(task_details: dict, emit_fn=None,
+                                session_id: str = "default",
+                                website_username: str = None,
+                                website_password: str = None) -> dict:
+    """Entry point called by the Assignment Agent."""
     params = task_details.get("parameters", {})
     destination = params.get("destination")
 
-    result = run_async(_run_market_analysis(destination, emit_fn))
+    result = run_async(_run_market_analysis(
+        destination, emit_fn,
+        session_id=session_id,
+        website_username=website_username,
+        website_password=website_password,
+    ))
     return result

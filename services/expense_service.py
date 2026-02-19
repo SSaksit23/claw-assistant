@@ -86,6 +86,9 @@ def get_job(job_id: str) -> Optional[dict]:
 def start_expense_job(
     file_path: str,
     emit_fn: Optional[Callable] = None,
+    session_id: str = "default",
+    website_username: str = None,
+    website_password: str = None,
 ) -> dict:
     """
     Start the expense recording workflow.
@@ -178,7 +181,12 @@ def start_expense_job(
     if n8n_integration.is_n8n_enabled():
         return _run_via_n8n(job_id, records, emit_fn)
     else:
-        return _run_direct(job_id, grouped, emit_fn)
+        return _run_direct(
+            job_id, grouped, emit_fn,
+            session_id=session_id,
+            website_username=website_username,
+            website_password=website_password,
+        )
 
 
 def _run_via_n8n(job_id: str, records: list, emit_fn) -> dict:
@@ -214,7 +222,12 @@ def _run_via_n8n(job_id: str, records: list, emit_fn) -> dict:
         return _run_direct(job_id, records, emit_fn)
 
 
-def _run_direct(job_id: str, grouped_records: dict, emit_fn) -> dict:
+def _run_direct(
+    job_id: str, grouped_records: dict, emit_fn,
+    session_id: str = "default",
+    website_username: str = None,
+    website_password: str = None,
+) -> dict:
     """Execute browser automation directly (no n8n).
 
     grouped_records: { tour_code: [record, ...], ... }
@@ -264,7 +277,12 @@ def _run_direct(job_id: str, grouped_records: dict, emit_fn) -> dict:
     # We poll the thread and drain queued progress in the eventlet greenlet
     # so the user sees live updates.
     result_q: _queue.Queue = _queue.Queue()
-    coro = _run_direct_async(job_id, grouped_records, thread_safe_emit)
+    coro = _run_direct_async(
+        job_id, grouped_records, thread_safe_emit,
+        session_id=session_id,
+        website_username=website_username,
+        website_password=website_password,
+    )
 
     def _worker():
         import asyncio as _aio
@@ -300,7 +318,12 @@ def _run_direct(job_id: str, grouped_records: dict, emit_fn) -> dict:
     return value
 
 
-async def _run_direct_async(job_id: str, grouped_records: dict, emit_fn) -> dict:
+async def _run_direct_async(
+    job_id: str, grouped_records: dict, emit_fn,
+    session_id: str = "default",
+    website_username: str = None,
+    website_password: str = None,
+) -> dict:
     """Async implementation of the direct expense automation flow.
 
     grouped_records: { tour_code: [record, ...], ... }
@@ -312,7 +335,11 @@ async def _run_direct_async(job_id: str, grouped_records: dict, emit_fn) -> dict
     job_start = datetime.now()
 
     _emit_timed(emit_fn, job_start, "Accounting Agent", "Logging in...")
-    login_result = await browser_tools.login()
+    login_result = await browser_tools.login(
+        username=website_username,
+        password=website_password,
+        session_id=session_id,
+    )
     if login_result["status"] != "success":
         _update_job(job_id, "failed", f"Login failed: {login_result['message']}")
         return {
@@ -344,7 +371,7 @@ async def _run_direct_async(job_id: str, grouped_records: dict, emit_fn) -> dict
             import asyncio as _aio
             timeout_secs = 120 + (n_items * 30)
             entry_result = await _aio.wait_for(
-                _process_tour_group(tour_code, line_items, emit_fn, job_start),
+                _process_tour_group(tour_code, line_items, emit_fn, job_start, session_id=session_id),
                 timeout=timeout_secs,
             )
         except Exception as timeout_err:
@@ -378,7 +405,7 @@ async def _run_direct_async(job_id: str, grouped_records: dict, emit_fn) -> dict
 
     # Close browser
     _emit_timed(emit_fn, job_start, "Accounting Agent", "Closing browser...")
-    await browser_tools.close_browser()
+    await browser_tools.close_browser(session_id=session_id)
 
     # ── Step 7: Return results ──
     total_elapsed = (datetime.now() - job_start).total_seconds()
@@ -504,7 +531,8 @@ CHARGE_TYPE_LABELS = {
 
 
 async def _process_tour_group(
-    tour_code: str, line_items: list, emit_fn=None, job_start=None
+    tour_code: str, line_items: list, emit_fn=None, job_start=None,
+    session_id: str = "default",
 ) -> dict:
     """Process a tour group (one or more line items) through a single form submission."""
     _job_start = job_start or datetime.now()
@@ -536,7 +564,7 @@ async def _process_tour_group(
     # ── Step C: Look up program code on /travelpackage ──
     if not program_code:
         _progress("searching program code on /travelpackage...")
-        lookup = await browser_tools.search_program_code(tour_code)
+        lookup = await browser_tools.search_program_code(tour_code, session_id=session_id)
         if lookup["status"] == "success":
             program_code = lookup["program_code"]
             _progress(f"found program: `{program_code}`")
@@ -595,7 +623,7 @@ async def _process_tour_group(
     try:
         # Navigate to the create form
         _progress("navigating to charges form...")
-        nav = await browser_tools.navigate_to_charges_form()
+        nav = await browser_tools.navigate_to_charges_form(session_id=session_id)
         if nav["status"] != "success":
             return {"tour_code": tour_code, "status": "failed", "error": f"Navigation: {nav['message']}"}
         _progress("on charges form page")
@@ -607,6 +635,7 @@ async def _process_tour_group(
             tour_code=tour_code,
             date_from=date_from,
             date_to=date_to,
+            session_id=session_id,
         )
         if sel["status"] != "success":
             logger.warning("Program selection returned: %s -- continuing anyway", sel.get("message"))
@@ -617,6 +646,7 @@ async def _process_tour_group(
         fill = await browser_tools.fill_expense_rows(
             rows=rows_for_form,
             payment_date=payment_date,
+            session_id=session_id,
         )
         if fill["status"] != "success":
             return {"tour_code": tour_code, "status": "failed", "error": f"Form fill: {fill['message']}"}
@@ -624,7 +654,7 @@ async def _process_tour_group(
 
         # Click "+ เพิ่มในค่าใช้จ่ายบริษัท" to reveal section 2
         _progress("opening company expense section...")
-        add_btn = await browser_tools.click_add_company_expense()
+        add_btn = await browser_tools.click_add_company_expense(session_id=session_id)
         if add_btn["status"] != "success":
             logger.warning("Could not open company expense section: %s", add_btn.get("message"))
 
@@ -647,19 +677,20 @@ async def _process_tour_group(
             payment_type=PAYMENT_TYPE_MAP.get(primary_charge_type, "ค่าทัวร์/ค่าแลนด์"),
             period=tour_code,
             remark=" / ".join(company_remark_parts),
+            session_id=session_id,
         )
         if comp_fill["status"] != "success":
             logger.warning("Company expense fill issue: %s", comp_fill.get("message"))
 
         # Submit
         _progress("submitting form...")
-        sub = await browser_tools.submit_form()
+        sub = await browser_tools.submit_form(session_id=session_id)
         if sub["status"] != "success":
             return {"tour_code": tour_code, "status": "failed", "error": f"Submit: {sub['message']}"}
 
         # Extract the expense number
         _progress("extracting order number...")
-        ext = await browser_tools.extract_order_number()
+        ext = await browser_tools.extract_order_number(session_id=session_id)
 
         return {
             "tour_code": tour_code,
@@ -730,7 +761,7 @@ def _build_date_range(depart_date_str: str | None) -> tuple[str, str]:
     return start.strftime("%d/%m/%Y"), end.strftime("%d/%m/%Y")
 
 
-def process_single_expense_api(data: dict) -> dict:
+def process_single_expense_api(data: dict, session_id: str = "default") -> dict:
     """
     API endpoint handler for processing a single expense.
     Called by n8n or external systems via POST /api/expenses.
@@ -747,7 +778,7 @@ def process_single_expense_api(data: dict) -> dict:
     }
 
     tour_code = record["tour_code"]
-    result = run_in_thread(_process_tour_group(tour_code, [record]))
+    result = run_in_thread(_process_tour_group(tour_code, [record], session_id=session_id))
     return result
 
 

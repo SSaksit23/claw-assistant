@@ -159,7 +159,12 @@ def process_message(
         }
 
 
-def delegate(intent: str, task_details: dict, file_path: str, emit_fn) -> dict | None:
+def delegate(
+    intent: str, task_details: dict, file_path: str, emit_fn,
+    session_id: str = "default",
+    website_username: str = None,
+    website_password: str = None,
+) -> dict | None:
     """
     Hand off to the appropriate specialist agent.
 
@@ -184,18 +189,34 @@ def delegate(intent: str, task_details: dict, file_path: str, emit_fn) -> dict |
         if intent == "expense_recording":
             if file_path:
                 from services.expense_service import start_expense_job
-                result = start_expense_job(file_path=file_path, emit_fn=emit_fn)
+                result = start_expense_job(
+                    file_path=file_path,
+                    emit_fn=emit_fn,
+                    session_id=session_id,
+                    website_username=website_username,
+                    website_password=website_password,
+                )
             else:
                 from agents.accounting_agent import handle_expense_task
                 result = handle_expense_task(task_details, file_path, emit_fn)
 
         elif intent == "data_analysis":
             from agents.data_analysis_agent import handle_data_analysis_task
-            result = handle_data_analysis_task(task_details, emit_fn)
+            result = handle_data_analysis_task(
+                task_details, emit_fn,
+                session_id=session_id,
+                website_username=website_username,
+                website_password=website_password,
+            )
 
         elif intent == "market_analysis":
             from agents.market_analysis_agent import handle_market_analysis_task
-            result = handle_market_analysis_task(task_details, emit_fn)
+            result = handle_market_analysis_task(
+                task_details, emit_fn,
+                session_id=session_id,
+                website_username=website_username,
+                website_password=website_password,
+            )
 
         elif intent == "executive_report":
             from agents.executive_agent import handle_executive_task
@@ -203,7 +224,12 @@ def delegate(intent: str, task_details: dict, file_path: str, emit_fn) -> dict |
 
         elif intent == "admin_task":
             from agents.admin_agent import handle_admin_task
-            result = handle_admin_task(task_details, emit_fn)
+            result = handle_admin_task(
+                task_details, emit_fn,
+                session_id=session_id,
+                website_username=website_username,
+                website_password=website_password,
+            )
 
     except Exception as e:
         logger.error(f"{agent_name} failed: {e}", exc_info=True)

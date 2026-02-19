@@ -96,7 +96,7 @@ def extract_date_from_tour_code(tour_code: str) -> str | None:
         return None
 
 
-async def search_program_code(group_code: str) -> dict:
+async def search_program_code(group_code: str, session_id: str = "default") -> dict:
     """
     Look up the program code for a given group/tour code by searching on
     /travelpackage.
@@ -107,7 +107,7 @@ async def search_program_code(group_code: str) -> dict:
     Returns {"status": "success", "program_code": "...", "program_name": "..."}
             or {"status": "not_found", ...}
     """
-    manager = BrowserManager.get_instance()
+    manager = BrowserManager.get_instance(session_id)
     page = await manager.get_page()
 
     # Build candidate search terms: full code, then shorter prefixes
@@ -220,12 +220,12 @@ async def _find_program_in_results(page, group_code: str) -> dict | None:
     return result
 
 
-async def login(username: str = None, password: str = None, max_retries: int = 3) -> dict:
+async def login(username: str = None, password: str = None, max_retries: int = 3, session_id: str = "default") -> dict:
     """
     Log in to qualityb2bpackage.com.
     The login button is #btnLogin (type="button", JS-driven).
     """
-    manager = BrowserManager.get_instance()
+    manager = BrowserManager.get_instance(session_id)
     if manager.is_logged_in:
         return {"status": "success", "message": "Already logged in"}
 
@@ -271,9 +271,9 @@ async def login(username: str = None, password: str = None, max_retries: int = 3
     return {"status": "failed", "message": "Login failed after all retries"}
 
 
-async def navigate_to_charges_form() -> dict:
+async def navigate_to_charges_form(session_id: str = "default") -> dict:
     """Navigate to /charges_group/create."""
-    manager = BrowserManager.get_instance()
+    manager = BrowserManager.get_instance(session_id)
     page = await manager.get_page()
 
     try:
@@ -310,12 +310,12 @@ async def navigate_to_charges_form() -> dict:
         return {"status": "failed", "message": str(e)}
 
 
-async def set_date_range(start_date: str, end_date: str) -> dict:
+async def set_date_range(start_date: str, end_date: str, session_id: str = "default") -> dict:
     """
     Set the program date range filter then wait for the dropdowns to load.
     Dates in dd/mm/yyyy format.
     """
-    manager = BrowserManager.get_instance()
+    manager = BrowserManager.get_instance(session_id)
     page = await manager.get_page()
 
     try:
@@ -353,6 +353,7 @@ async def select_program_and_tour(
     tour_code: str = None,
     date_from: str = None,
     date_to: str = None,
+    session_id: str = "default",
 ) -> dict:
     """
     Select tour program and tour code from Bootstrap selectpicker dropdowns.
@@ -361,7 +362,7 @@ async def select_program_and_tour(
     After selecting the program, waits for the tour/period dropdown to reload
     (AJAX) before selecting the tour code.
     """
-    manager = BrowserManager.get_instance()
+    manager = BrowserManager.get_instance(session_id)
     page = await manager.get_page()
 
     try:
@@ -429,12 +430,13 @@ async def fill_expense_form(
     currency: str = "THB",
     exchange_rate: float = 1.0,
     remark: str = "",
+    session_id: str = "default",
 ) -> dict:
     """
     Fill the expense row fields on /charges_group/create.
     Uses the actual field names from the form.
     """
-    manager = BrowserManager.get_instance()
+    manager = BrowserManager.get_instance(session_id)
     page = await manager.get_page()
 
     try:
@@ -573,6 +575,7 @@ async def _add_expense_row(page) -> bool:
 async def fill_expense_rows(
     rows: list[dict],
     payment_date: str = None,
+    session_id: str = "default",
 ) -> dict:
     """
     Fill the expense section on /charges_group/create.
@@ -581,7 +584,7 @@ async def fill_expense_rows(
     and a detailed breakdown in the description and remark fields.
     This is more reliable than trying to add multiple rows to the form.
     """
-    manager = BrowserManager.get_instance()
+    manager = BrowserManager.get_instance(session_id)
     page = await manager.get_page()
 
     if not rows:
@@ -711,12 +714,12 @@ async def fill_expense_rows(
         return {"status": "failed", "message": str(e), "rows_filled": []}
 
 
-async def click_add_company_expense() -> dict:
+async def click_add_company_expense(session_id: str = "default") -> dict:
     """
     Click the '+ เพิ่มในค่าใช้จ่ายบริษัท' button to reveal the company
     expense section (section 2) of the form.
     """
-    manager = BrowserManager.get_instance()
+    manager = BrowserManager.get_instance(session_id)
     page = await manager.get_page()
 
     try:
@@ -756,6 +759,7 @@ async def fill_company_expense(
     payment_type: str = "ค่าทัวร์/ค่าแลนด์",
     period: str = "",
     remark: str = "",
+    session_id: str = "default",
 ) -> dict:
     """
     Fill the company expense section (section 2) of the charges form.
@@ -774,7 +778,7 @@ async def fill_company_expense(
         period: Period / tour code
         remark: Additional notes
     """
-    manager = BrowserManager.get_instance()
+    manager = BrowserManager.get_instance(session_id)
     page = await manager.get_page()
 
     try:
@@ -895,9 +899,9 @@ async def fill_company_expense(
         return {"status": "failed", "message": str(e)}
 
 
-async def submit_form() -> dict:
+async def submit_form(session_id: str = "default") -> dict:
     """Click the Save submit button (input[type='submit'])."""
-    manager = BrowserManager.get_instance()
+    manager = BrowserManager.get_instance(session_id)
     page = await manager.get_page()
 
     try:
@@ -947,12 +951,12 @@ async def submit_form() -> dict:
         return {"status": "failed", "message": str(e)}
 
 
-async def extract_order_number() -> dict:
+async def extract_order_number(session_id: str = "default") -> dict:
     """
     Read the expense number from #charges_no or from the page text.
     Pattern: C2026XX-XXXXXX
     """
-    manager = BrowserManager.get_instance()
+    manager = BrowserManager.get_instance(session_id)
     page = await manager.get_page()
 
     try:
@@ -988,21 +992,20 @@ async def extract_order_number() -> dict:
         return {"status": "failed", "message": str(e)}
 
 
-async def close_browser() -> dict:
+async def close_browser(session_id: str = "default") -> dict:
     """Gracefully close the browser session."""
     try:
-        manager = BrowserManager.get_instance()
-        await manager.close()
+        await BrowserManager.destroy_instance(session_id)
         return {"status": "success", "message": "Browser closed"}
     except Exception as e:
         logger.error("Error closing browser: %s", e)
         return {"status": "failed", "message": str(e)}
 
 
-async def scrape_table_data(page=None) -> list:
+async def scrape_table_data(page=None, session_id: str = "default") -> list:
     """Extract data from HTML tables on the current page."""
     if page is None:
-        manager = BrowserManager.get_instance()
+        manager = BrowserManager.get_instance(session_id)
         page = await manager.get_page()
 
     try:

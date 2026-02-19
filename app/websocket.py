@@ -12,8 +12,8 @@ heartbeat is never blocked.
 import logging
 from datetime import datetime
 
-from flask_socketio import emit
-from flask import request
+from flask_socketio import emit, disconnect
+from flask import request, session as flask_session
 
 from app import socketio
 from services import learning_service
@@ -25,16 +25,25 @@ sessions = {}
 
 @socketio.on("connect")
 def handle_connect():
+    if not flask_session.get("authenticated"):
+        logger.warning("Unauthenticated WebSocket connection rejected")
+        disconnect()
+        return False
+
     sid = request.sid
     sessions[sid] = {
         "id": sid,
         "connected_at": datetime.utcnow().isoformat(),
         "messages": [],
+        "session_id": flask_session.get("session_id", "default"),
+        "website_username": flask_session.get("website_username", ""),
+        "website_password": flask_session.get("website_password", ""),
     }
-    logger.info(f"Client connected: {sid}")
+    username = flask_session.get("website_username", "unknown")
+    logger.info("Client connected: %s (user=%s, session=%s)", sid, username, sessions[sid]["session_id"])
     emit("system_message", {
         "type": "system",
-        "content": "Connected to Web365 ClawBot.",
+        "content": f"Connected to Web365 ClawBot. Signed in as **{username}**.",
         "timestamp": datetime.utcnow().isoformat(),
     })
 
@@ -81,20 +90,27 @@ def handle_user_message(data):
         "message": "Understanding your request...",
     })
 
-    # Hand off ALL processing to a background greenlet.
-    # This returns control to eventlet so heartbeats keep flowing.
+    user_session_id = session.get("session_id", "default")
+    website_username = session.get("website_username", "")
+    website_password = session.get("website_password", "")
+
     socketio.start_background_task(
         _process_in_background,
         sid,
         message,
         file_path,
         list(session["messages"][-12:]),
+        user_session_id,
+        website_username,
+        website_password,
     )
 
 
 # ── background worker ──────────────────────────────────────────────────────
 
-def _process_in_background(sid, message, file_path, history):
+def _process_in_background(sid, message, file_path, history,
+                           user_session_id="default",
+                           website_username="", website_password=""):
     """
     Runs on a separate eventlet greenlet. Uses socketio.emit() (server-side)
     instead of flask-socketio's context-aware emit() because we're outside
@@ -153,6 +169,9 @@ def _process_in_background(sid, message, file_path, history):
                 task_details=task_details,
                 file_path=file_path,
                 emit_fn=_emit,
+                session_id=user_session_id,
+                website_username=website_username,
+                website_password=website_password,
             )
 
             if specialist_result and specialist_result.get("content"):

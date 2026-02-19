@@ -17,9 +17,9 @@ from config import Config
 logger = logging.getLogger(__name__)
 
 
-async def _scrape_booking_data(emit_fn=None) -> dict:
+async def _scrape_booking_data(emit_fn=None, session_id: str = "default") -> dict:
     """Scrape booking data from /booking page."""
-    manager = BrowserManager.get_instance()
+    manager = BrowserManager.get_instance(session_id)
     page = await manager.get_page()
 
     try:
@@ -49,9 +49,9 @@ async def _scrape_booking_data(emit_fn=None) -> dict:
         return {"status": "failed", "error": str(e), "data": []}
 
 
-async def _scrape_seller_report(report_type: str = "tour", emit_fn=None) -> dict:
+async def _scrape_seller_report(report_type: str = "tour", emit_fn=None, session_id: str = "default") -> dict:
     """Scrape seller performance report from /report/report_seller."""
-    manager = BrowserManager.get_instance()
+    manager = BrowserManager.get_instance(session_id)
     page = await manager.get_page()
 
     try:
@@ -95,36 +95,37 @@ async def _scrape_seller_report(report_type: str = "tour", emit_fn=None) -> dict
         return {"status": "failed", "error": str(e), "data": []}
 
 
-async def _run_data_analysis(analysis_type: str = "all", emit_fn=None) -> dict:
+async def _run_data_analysis(analysis_type: str = "all", emit_fn=None,
+                             session_id: str = "default",
+                             website_username: str = None,
+                             website_password: str = None) -> dict:
     """Run the complete data analysis workflow."""
     results = {}
 
-    # Login first
     if emit_fn:
         emit_fn("agent_progress", {
             "agent": "Data Analysis Agent",
             "message": "Logging into the website...",
         })
 
-    login_result = await browser_tools.login()
+    login_result = await browser_tools.login(
+        username=website_username, password=website_password, session_id=session_id,
+    )
     if login_result["status"] != "success":
         return {
             "content": f"Login failed: {login_result['message']}",
             "data": None,
         }
 
-    # Extract booking data
     if analysis_type in ("all", "booking"):
-        booking_data = await _scrape_booking_data(emit_fn)
+        booking_data = await _scrape_booking_data(emit_fn, session_id=session_id)
         results["bookings"] = booking_data
 
-    # Extract seller report
     if analysis_type in ("all", "report"):
-        report_data = await _scrape_seller_report("tour", emit_fn)
+        report_data = await _scrape_seller_report("tour", emit_fn, session_id=session_id)
         results["seller_report"] = report_data
 
-    # Close browser
-    await browser_tools.close_browser()
+    await browser_tools.close_browser(session_id=session_id)
 
     # Save results to file
     output_path = os.path.join(Config.DATA_DIR, "booking_data.json")
@@ -156,16 +157,18 @@ async def _run_data_analysis(analysis_type: str = "all", emit_fn=None) -> dict:
     return {"content": summary, "data": results}
 
 
-def handle_data_analysis_task(task_details: dict, emit_fn=None) -> dict:
-    """
-    Entry point called by the Assignment Agent.
-
-    Args:
-        task_details: dict with 'action' and 'parameters'
-        emit_fn: WebSocket emit function for progress updates
-    """
+def handle_data_analysis_task(task_details: dict, emit_fn=None,
+                              session_id: str = "default",
+                              website_username: str = None,
+                              website_password: str = None) -> dict:
+    """Entry point called by the Assignment Agent."""
     params = task_details.get("parameters", {})
     analysis_type = params.get("analysis_type", "all")
 
-    result = run_async(_run_data_analysis(analysis_type, emit_fn))
+    result = run_async(_run_data_analysis(
+        analysis_type, emit_fn,
+        session_id=session_id,
+        website_username=website_username,
+        website_password=website_password,
+    ))
     return result

@@ -2,18 +2,25 @@
 HTTP routes for the web application.
 
 Serves:
-1. Chat UI page (GET /)
-2. File upload (POST /upload)
-3. REST API endpoints for n8n integration (/api/*)
+1. Login page (GET/POST /login)
+2. Chat UI page (GET /)
+3. File upload (POST /upload)
+4. REST API endpoints for n8n integration (/api/*)
 """
 
 import os
 import uuid
 import json
+import time
 import logging
+from functools import wraps
 from datetime import datetime
+from collections import defaultdict
 
-from flask import Blueprint, render_template, request, jsonify, send_file
+from flask import (
+    Blueprint, render_template, request, jsonify,
+    send_file, session, redirect, url_for,
+)
 from werkzeug.utils import secure_filename
 
 from config import Config
@@ -24,15 +31,81 @@ main_bp = Blueprint("main", __name__)
 
 ALLOWED_EXTENSIONS = {"csv", "xlsx", "xls", "pdf", "docx", "txt"}
 
+_login_attempts: dict[str, list[float]] = defaultdict(list)
+_RATE_LIMIT_WINDOW = 300  # 5 minutes
+_RATE_LIMIT_MAX = 10      # max attempts per window
+
 
 def _allowed_file(filename):
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
+
+
+def login_required(f):
+    """Decorator that redirects unauthenticated users to the login page."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not session.get("authenticated"):
+            return redirect(url_for("main.login"))
+        return f(*args, **kwargs)
+    return decorated
+
+
+# ===================================================================
+# Auth routes
+# ===================================================================
+@main_bp.route("/login", methods=["GET", "POST"])
+def login():
+    """Show login form or process login credentials."""
+    if session.get("authenticated"):
+        return redirect(url_for("main.index"))
+
+    if request.method == "POST":
+        client_ip = request.remote_addr or "unknown"
+        now = time.time()
+        _login_attempts[client_ip] = [
+            t for t in _login_attempts[client_ip] if now - t < _RATE_LIMIT_WINDOW
+        ]
+        if len(_login_attempts[client_ip]) >= _RATE_LIMIT_MAX:
+            logger.warning("Rate limited login from %s", client_ip)
+            return render_template("login.html", error="Too many login attempts. Please wait a few minutes."), 429
+        _login_attempts[client_ip].append(now)
+
+        username = request.form.get("username", "").strip()
+        password = request.form.get("password", "").strip()
+
+        if not username or not password:
+            return render_template("login.html", error="Please enter both username and password.")
+
+        session.permanent = True
+        session["authenticated"] = True
+        session["website_username"] = username
+        session["website_password"] = password
+        session["session_id"] = uuid.uuid4().hex[:12]
+        session["logged_in_at"] = datetime.now().isoformat()
+        logger.info("User logged in: %s (session %s)", username, session["session_id"])
+        return redirect(url_for("main.index"))
+
+    return render_template("login.html")
+
+
+@main_bp.route("/logout")
+def logout():
+    """Clear session and destroy the user's browser instance."""
+    sid = session.get("session_id")
+    username = session.get("website_username", "unknown")
+    if sid:
+        from tools.browser_manager import BrowserManager
+        BrowserManager.schedule_destroy(sid)
+    session.clear()
+    logger.info("User logged out: %s (session %s)", username, sid)
+    return redirect(url_for("main.login"))
 
 
 # ===================================================================
 # Page routes
 # ===================================================================
 @main_bp.route("/")
+@login_required
 def index():
     """Serve the main chat interface."""
     return render_template("chat.html")
@@ -42,6 +115,7 @@ def index():
 # File upload
 # ===================================================================
 @main_bp.route("/upload", methods=["POST"])
+@login_required
 def upload_file():
     """Handle file uploads (CSV, Excel, PDF, DOCX)."""
     if "file" not in request.files:
@@ -76,11 +150,14 @@ def upload_file():
 # ===================================================================
 @main_bp.route("/health")
 def health():
-    """Health check endpoint."""
+    """Health check endpoint (no auth required)."""
+    from tools.browser_manager import BrowserManager
     return jsonify({
         "status": "ok",
         "service": "web365-clawbot",
         "n8n_enabled": Config.N8N_ENABLED,
+        "active_browsers": BrowserManager.active_count(),
+        "max_browsers": BrowserManager.MAX_INSTANCES,
         "timestamp": datetime.now().isoformat(),
     })
 
@@ -193,10 +270,14 @@ def api_list_packages():
     keyword = request.args.get("keyword", "")
     limit = int(request.args.get("limit", 50))
 
+    sid = session.get("session_id", "default")
+    ws_user = session.get("website_username")
+    ws_pass = session.get("website_password")
+
     async def _get_packages():
-        await login()
+        await login(username=ws_user, password=ws_pass, session_id=sid)
         from tools.browser_manager import BrowserManager
-        manager = BrowserManager.get_instance()
+        manager = BrowserManager.get_instance(sid)
         page = await manager.get_page()
 
         url = Config.TRAVEL_PACKAGE_URL
@@ -205,8 +286,8 @@ def api_list_packages():
         await page.goto(url, wait_until="networkidle")
         await page.wait_for_timeout(2000)
 
-        data = await scrape_table_data(page)
-        await close_browser()
+        data = await scrape_table_data(page, session_id=sid)
+        await close_browser(session_id=sid)
         return data[:limit]
 
     packages = run_async(_get_packages())
@@ -462,6 +543,7 @@ def api_callback():
 
 
 @main_bp.route("/api/export/<job_id>", methods=["GET"])
+@login_required
 def api_export_csv(job_id: str):
     """Download the CSV report for a completed job."""
     csv_path = os.path.join(Config.DATA_DIR, f"expenses_{job_id}.csv")

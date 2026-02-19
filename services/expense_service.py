@@ -332,8 +332,26 @@ async def _run_direct_async(
     SocketIO emit.  Safe to call from the Playwright OS thread.
     """
 
-    job_start = datetime.now()
+    from tools.browser_manager import BrowserManager
 
+    job_start = datetime.now()
+    BrowserManager.acquire(session_id)
+
+    try:
+        return await _run_direct_async_inner(
+            job_id, grouped_records, emit_fn, job_start,
+            session_id=session_id,
+            website_username=website_username,
+            website_password=website_password,
+        )
+    finally:
+        BrowserManager.release(session_id)
+
+
+async def _run_direct_async_inner(
+    job_id, grouped_records, emit_fn, job_start,
+    session_id="default", website_username=None, website_password=None,
+):
     _emit_timed(emit_fn, job_start, "Accounting Agent", "Logging in...")
     login_result = await browser_tools.login(
         username=website_username,
@@ -371,7 +389,12 @@ async def _run_direct_async(
             import asyncio as _aio
             timeout_secs = 120 + (n_items * 30)
             entry_result = await _aio.wait_for(
-                _process_tour_group(tour_code, line_items, emit_fn, job_start, session_id=session_id),
+                _process_tour_group(
+                    tour_code, line_items, emit_fn, job_start,
+                    session_id=session_id,
+                    website_username=website_username,
+                    website_password=website_password,
+                ),
                 timeout=timeout_secs,
             )
         except Exception as timeout_err:
@@ -402,10 +425,6 @@ async def _run_direct_async(
             _emit_timed(emit_fn, job_start, "Accounting Agent",
                         f"**Group {i}/{total} FAILED** ({elapsed_rec:.1f}s)\n"
                         f"- Error: {entry_result.get('error', 'Unknown error')}")
-
-    # Close browser
-    _emit_timed(emit_fn, job_start, "Accounting Agent", "Closing browser...")
-    await browser_tools.close_browser(session_id=session_id)
 
     # ── Step 7: Return results ──
     total_elapsed = (datetime.now() - job_start).total_seconds()
@@ -533,6 +552,8 @@ CHARGE_TYPE_LABELS = {
 async def _process_tour_group(
     tour_code: str, line_items: list, emit_fn=None, job_start=None,
     session_id: str = "default",
+    website_username: str = None,
+    website_password: str = None,
 ) -> dict:
     """Process a tour group (one or more line items) through a single form submission."""
     _job_start = job_start or datetime.now()
@@ -564,7 +585,15 @@ async def _process_tour_group(
     # ── Step C: Look up program code on /travelpackage ──
     if not program_code:
         _progress("searching program code on /travelpackage...")
-        lookup = await browser_tools.search_program_code(tour_code, session_id=session_id)
+        try:
+            import asyncio as _aio
+            lookup = await _aio.wait_for(
+                browser_tools.search_program_code(tour_code, session_id=session_id),
+                timeout=60,
+            )
+        except Exception as search_err:
+            logger.warning("Program code search timed out or failed: %s", search_err)
+            lookup = {"status": "failed", "message": str(search_err)}
         if lookup["status"] == "success":
             program_code = lookup["program_code"]
             _progress(f"found program: `{program_code}`")
@@ -625,7 +654,15 @@ async def _process_tour_group(
         _progress("navigating to charges form...")
         nav = await browser_tools.navigate_to_charges_form(session_id=session_id)
         if nav["status"] != "success":
-            return {"tour_code": tour_code, "status": "failed", "error": f"Navigation: {nav['message']}"}
+            if "session expired" in nav.get("message", "").lower() or "login" in nav.get("message", "").lower():
+                _progress("session expired, re-authenticating...")
+                relogin = await browser_tools.login(
+                    username=website_username, password=website_password, session_id=session_id,
+                )
+                if relogin["status"] == "success":
+                    nav = await browser_tools.navigate_to_charges_form(session_id=session_id)
+            if nav["status"] != "success":
+                return {"tour_code": tour_code, "status": "failed", "error": f"Navigation: {nav['message']}"}
         _progress("on charges form page")
 
         # Set date range and select program + tour code

@@ -100,6 +100,17 @@ async def _run_data_analysis(analysis_type: str = "all", emit_fn=None,
                              website_username: str = None,
                              website_password: str = None) -> dict:
     """Run the complete data analysis workflow."""
+    from tools.browser_manager import BrowserManager
+    BrowserManager.acquire(session_id)
+    try:
+        return await _run_data_analysis_inner(
+            analysis_type, emit_fn, session_id, website_username, website_password)
+    finally:
+        BrowserManager.release(session_id)
+
+
+async def _run_data_analysis_inner(analysis_type, emit_fn, session_id,
+                                   website_username, website_password):
     results = {}
 
     if emit_fn:
@@ -124,8 +135,6 @@ async def _run_data_analysis(analysis_type: str = "all", emit_fn=None,
     if analysis_type in ("all", "report"):
         report_data = await _scrape_seller_report("tour", emit_fn, session_id=session_id)
         results["seller_report"] = report_data
-
-    await browser_tools.close_browser(session_id=session_id)
 
     # Save results to file
     output_path = os.path.join(Config.DATA_DIR, "booking_data.json")

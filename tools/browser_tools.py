@@ -121,12 +121,16 @@ async def search_program_code(group_code: str, session_id: str = "default") -> d
         url = Config.TRAVEL_PACKAGE_URL
         logger.info("Navigating to travelpackage: %s", url)
         try:
-            await asyncio.wait_for(
-                page.goto(url, wait_until="domcontentloaded"),
-                timeout=15,
-            )
-        except asyncio.TimeoutError:
-            logger.warning("travelpackage page.goto timed out, continuing anyway")
+            await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+        except Exception as nav_err:
+            logger.warning("travelpackage page.goto failed: %s — retrying with new page", nav_err)
+            try:
+                await manager.reset()
+                page = await manager.get_page()
+                await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+            except Exception as retry_err:
+                logger.error("travelpackage retry also failed: %s", retry_err)
+                return {"status": "failed", "message": f"Cannot load travelpackage page: {retry_err}"}
         await asyncio.sleep(2)
 
         search_input = await page.query_selector('#input_search')
@@ -236,7 +240,7 @@ async def login(username: str = None, password: str = None, max_retries: int = 3
     for attempt in range(1, max_retries + 1):
         try:
             logger.info("Login attempt %d/%d", attempt, max_retries)
-            await page.goto(Config.WEBSITE_URL, wait_until="domcontentloaded")
+            await page.goto(Config.WEBSITE_URL, wait_until="domcontentloaded", timeout=20000)
             await asyncio.sleep(2)
 
             await page.fill('input[name="username"]', username)
@@ -284,21 +288,28 @@ async def navigate_to_charges_form(session_id: str = "default") -> dict:
         page.on("dialog", lambda d: d.accept())
 
         try:
-            await asyncio.wait_for(
-                page.goto(url, wait_until="domcontentloaded"),
-                timeout=20,
-            )
-        except asyncio.TimeoutError:
-            logger.warning("page.goto timed out after 20s, checking if page loaded anyway...")
+            await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+        except Exception as goto_err:
+            logger.warning("page.goto failed: %s — checking if page loaded anyway", goto_err)
             current_url = page.url
             if "charges_group" in current_url:
-                logger.info("Page DID navigate to %s despite timeout", current_url)
+                logger.info("Page DID navigate to %s despite error", current_url)
             else:
                 logger.warning("Page still at %s, trying direct JS navigation", current_url)
-                await page.evaluate(f"window.location.href = '{url}'")
-                await asyncio.sleep(5)
+                try:
+                    await page.evaluate(f"window.location.href = '{url}'")
+                    await page.wait_for_load_state("domcontentloaded", timeout=15000)
+                except Exception:
+                    pass
 
         await asyncio.sleep(2)
+
+        current_url = page.url
+        if "member/login" in current_url or "login" in current_url.split("/")[-1].lower():
+            logger.warning("Redirected to login page (%s) — session expired, need re-login", current_url)
+            manager.is_logged_in = False
+            return {"status": "failed", "message": "Session expired — redirected to login page"}
+
         title = await page.title()
         logger.info("Charges form page loaded: title='%s' url='%s'", title, page.url)
         await manager.screenshot("charges_form_loaded")
@@ -306,7 +317,10 @@ async def navigate_to_charges_form(session_id: str = "default") -> dict:
 
     except Exception as e:
         logger.error("Navigation failed: %s", e, exc_info=True)
-        await manager.screenshot("navigation_failed")
+        try:
+            await manager.screenshot("navigation_failed")
+        except Exception:
+            pass
         return {"status": "failed", "message": str(e)}
 
 
@@ -928,11 +942,8 @@ async def submit_form(session_id: str = "default") -> dict:
 
         logger.info("submit_form: clicked submit, waiting for page load...")
         try:
-            await asyncio.wait_for(
-                page.wait_for_load_state("domcontentloaded"),
-                timeout=15,
-            )
-        except asyncio.TimeoutError:
+            await page.wait_for_load_state("domcontentloaded", timeout=15000)
+        except Exception:
             logger.warning("submit_form: domcontentloaded timed out, continuing")
         await asyncio.sleep(3)
         logger.info("submit_form: done")

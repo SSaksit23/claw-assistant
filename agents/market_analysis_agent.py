@@ -133,6 +133,17 @@ async def _run_market_analysis(destination: Optional[str] = None, emit_fn=None,
                                website_username: str = None,
                                website_password: str = None) -> dict:
     """Run the complete market analysis workflow."""
+    from tools.browser_manager import BrowserManager
+    BrowserManager.acquire(session_id)
+    try:
+        return await _run_market_analysis_inner(
+            destination, emit_fn, session_id, website_username, website_password)
+    finally:
+        BrowserManager.release(session_id)
+
+
+async def _run_market_analysis_inner(destination, emit_fn, session_id,
+                                     website_username, website_password):
     if emit_fn:
         emit_fn("agent_progress", {
             "agent": "Market Analysis Agent",
@@ -149,8 +160,6 @@ async def _run_market_analysis(destination: Optional[str] = None, emit_fn=None,
         }
 
     packages_result = await _scrape_travel_packages(destination, emit_fn, session_id=session_id)
-
-    await browser_tools.close_browser(session_id=session_id)
 
     if packages_result["status"] != "success" or not packages_result["data"]:
         return {

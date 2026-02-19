@@ -20,7 +20,16 @@ async def _manage_records(action: str, params: dict, emit_fn=None,
                           website_username: str = None,
                           website_password: str = None) -> dict:
     """Perform administrative record management tasks."""
+    BrowserManager.acquire(session_id)
+    try:
+        return await _manage_records_inner(
+            action, params, emit_fn, session_id, website_username, website_password)
+    finally:
+        BrowserManager.release(session_id)
 
+
+async def _manage_records_inner(action, params, emit_fn, session_id,
+                                website_username, website_password):
     if emit_fn:
         emit_fn("agent_progress", {
             "agent": "Admin Agent",
@@ -116,9 +125,6 @@ async def _manage_records(action: str, params: dict, emit_fn=None,
         logger.error(f"Admin task failed: {e}", exc_info=True)
         summary = f"An error occurred: {str(e)}"
         results = {"action": action, "status": "failed", "error": str(e)}
-
-    finally:
-        await browser_tools.close_browser(session_id=session_id)
 
     return {"content": summary, "data": results}
 

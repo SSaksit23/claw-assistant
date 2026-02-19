@@ -138,8 +138,7 @@ async def _run_expense_automation(records: list, emit_fn=None) -> dict:
         else:
             fail_count += 1
 
-    # Step 3: Close browser
-    await browser_tools.close_browser()
+    # Browser stays alive for session reuse; idle timeout handles cleanup
 
     # Build summary
     summary = f"**Expense Processing Complete**\n\n"

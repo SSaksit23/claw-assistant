@@ -48,6 +48,7 @@ class BrowserManager:
 
     _instances: dict[str, "BrowserManager"] = {}
     _last_access: dict[str, float] = {}
+    _active_jobs: dict[str, int] = {}
 
     MAX_INSTANCES = int(os.getenv("MAX_BROWSER_INSTANCES", "10"))
     IDLE_TIMEOUT = int(os.getenv("BROWSER_IDLE_TIMEOUT", "1800"))  # 30 min
@@ -100,9 +101,34 @@ class BrowserManager:
         return result
 
     @classmethod
-    def destroy_instance(cls, session_id: str):
-        """Remove and close a specific session's browser (async context)."""
+    def acquire(cls, session_id: str):
+        """Increment the job reference count so the browser isn't destroyed mid-job."""
         with _pool_lock:
+            cls._active_jobs[session_id] = cls._active_jobs.get(session_id, 0) + 1
+            logger.info("Browser acquired for session=%s (jobs=%d)", session_id, cls._active_jobs[session_id])
+
+    @classmethod
+    def release(cls, session_id: str):
+        """Decrement the job reference count."""
+        with _pool_lock:
+            count = cls._active_jobs.get(session_id, 0)
+            if count > 1:
+                cls._active_jobs[session_id] = count - 1
+            else:
+                cls._active_jobs.pop(session_id, None)
+            logger.info("Browser released for session=%s (jobs=%d)", session_id, max(0, count - 1))
+
+    @classmethod
+    def destroy_instance(cls, session_id: str):
+        """Remove and close a specific session's browser (async context).
+        Skips destruction if other jobs are still using this session."""
+        with _pool_lock:
+            if cls._active_jobs.get(session_id, 0) > 0:
+                logger.info(
+                    "Skipping browser destroy for session=%s — %d job(s) still active",
+                    session_id, cls._active_jobs[session_id],
+                )
+                return _noop_coro()
             inst = cls._instances.pop(session_id, None)
             cls._last_access.pop(session_id, None)
         if inst:
@@ -112,8 +138,15 @@ class BrowserManager:
 
     @classmethod
     def schedule_destroy(cls, session_id: str):
-        """Remove and close a session's browser from a sync/eventlet context."""
+        """Remove and close a session's browser from a sync/eventlet context.
+        Skips destruction if other jobs are still using this session."""
         with _pool_lock:
+            if cls._active_jobs.get(session_id, 0) > 0:
+                logger.info(
+                    "Skipping scheduled browser destroy for session=%s — %d job(s) still active",
+                    session_id, cls._active_jobs[session_id],
+                )
+                return
             inst = cls._instances.pop(session_id, None)
             cls._last_access.pop(session_id, None)
         if inst:

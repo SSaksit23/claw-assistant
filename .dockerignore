@@ -1,18 +1,38 @@
-.git
+# Environment and secrets
 .env
 .env.*
-__pycache__
+
+# Data and uploads (mounted as volumes in production)
+data/
+logs/
+
+# Python bytecode
+__pycache__/
 *.pyc
 *.pyo
-.pytest_cache
-.mypy_cache
-.vscode
-.cursor
-node_modules
-logs/
-data/uploads/
-data/itineraries/
-*.png
-*.jpg
-*.jpeg
-agent-transcripts/
+
+# Git
+.git/
+.gitignore
+
+# IDE / editor
+.vscode/
+.cursor/
+.claude/
+*.swp
+*.swo
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# Test files
+test_*.py
+tests/
+
+# Documentation and plans
+*.plan.md
+README.md
+
+# Learnings database (recreated at runtime)
+.learnings/

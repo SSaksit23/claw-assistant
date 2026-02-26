@@ -224,18 +224,31 @@ async def login(username: str = None, password: str = None, max_retries: int = 3
     """
     Log in to qualityb2bpackage.com.
     The login button is #btnLogin (type="button", JS-driven).
+    Forces re-login when a different user's credentials are provided.
     """
     manager = BrowserManager.get_instance(session_id)
-    if manager.is_logged_in:
-        return {"status": "success", "message": "Already logged in"}
-
     username = username or Config.WEBSITE_USERNAME
     password = password or Config.WEBSITE_PASSWORD
+
+    if manager.is_logged_in:
+        if manager.logged_in_username and manager.logged_in_username != username:
+            logger.info("Different user (%s -> %s), forcing re-login for session=%s",
+                        manager.logged_in_username, username, session_id)
+            page = await manager.get_page()
+            try:
+                await page.context.clear_cookies()
+            except Exception:
+                pass
+            manager.is_logged_in = False
+            manager.logged_in_username = None
+        else:
+            return {"status": "success", "message": "Already logged in"}
+
     page = await manager.get_page()
 
     for attempt in range(1, max_retries + 1):
         try:
-            logger.info("Login attempt %d/%d", attempt, max_retries)
+            logger.info("Login attempt %d/%d for user=%s", attempt, max_retries, username)
             await page.goto(Config.WEBSITE_URL, wait_until="domcontentloaded", timeout=20000)
             await asyncio.sleep(2)
 
@@ -247,8 +260,9 @@ async def login(username: str = None, password: str = None, max_retries: int = 3
             current_url = page.url
             if "login" not in current_url.lower():
                 manager.is_logged_in = True
+                manager.logged_in_username = username
                 await manager.screenshot("login_success")
-                logger.info("Login successful, URL: %s", current_url)
+                logger.info("Login successful for user=%s, URL: %s", username, current_url)
                 return {"status": "success", "message": "Logged in successfully"}
 
             logger.warning("Still on login page after attempt %d, URL: %s", attempt, current_url)
@@ -561,8 +575,13 @@ async def fill_expense_rows(
     Fill the expense section on /charges_group/create.
 
     Combines all line items into a single form row with the TOTAL amount
-    and a detailed breakdown in the description and remark fields.
-    This is more reliable than trying to add multiple rows to the form.
+    and a clean, structured description.
+
+    Each row dict should contain:
+        - amount, currency, exchange_rate, charge_type
+        - expense_label: English name (e.g., "Airline Ticket")
+        - formatted_description: pre-built multi-line description block
+        - remark: detailed remark text (on first row only)
     """
     manager = BrowserManager.get_instance(session_id)
     page = await manager.get_page()
@@ -574,28 +593,30 @@ async def fill_expense_rows(
     currency = rows[0].get("currency", "THB")
     exchange_rate = rows[0].get("exchange_rate", 1.0)
 
-    # Calculate total amount across all line items
     total_amount = sum(r.get("amount", 0) for r in rows)
 
-    # Build combined description with line item breakdown
-    desc_parts = []
-    for r in rows:
-        desc = r.get("description", "")
+    # Build a concise description for the form input field.
+    # Single item: "Airline Ticket 21 Pax x 6,200 = 130,200 CNY"
+    # Multi items:  "Tour Fare + Single Room Supplement + Service Fee = 98,180 CNY"
+    if len(rows) == 1:
+        r = rows[0]
+        label = r.get("expense_label") or r.get("charge_type", "Other")
         amt = r.get("amount", 0)
         pax = r.get("pax")
         up = r.get("unit_price")
         if pax and up:
-            desc_parts.append(f"{desc}: {up}x{pax}={amt:,.0f}")
+            combined_desc = f"{label} {pax} Pax x {up:,.0f} = {amt:,.0f} {currency}"
         else:
-            desc_parts.append(f"{desc}: {amt:,.0f}")
-    combined_desc = " / ".join(desc_parts)
+            combined_desc = f"{label} {amt:,.0f} {currency}"
+    else:
+        labels = [r.get("expense_label") or r.get("charge_type", "Other") for r in rows]
+        combined_desc = f"{' + '.join(labels)} = {total_amount:,.0f} {currency}"
 
-    # Determine primary charge type (from the largest amount item)
     primary_row = max(rows, key=lambda r: r.get("amount", 0))
     primary_charge_type = primary_row.get("charge_type", "other")
 
     logger.info("fill_expense_rows: %d items, total=%s %s, desc=%s",
-                len(rows), total_amount, currency, combined_desc[:80])
+                len(rows), total_amount, currency, combined_desc[:100])
 
     try:
         await asyncio.sleep(1)
@@ -610,7 +631,7 @@ async def fill_expense_rows(
         if receipt_sel:
             await _set_input_value(page, 'input[name="receipt_date"]', payment_date or today)
 
-        # Description — combined breakdown
+        # Description — concise one-liner
         logger.info("fill_expense_rows: setting description")
         desc_el = await page.query_selector('input[name="description[]"]')
         if desc_el:
@@ -641,7 +662,7 @@ async def fill_expense_rows(
             if rate_el:
                 await rate_el.fill(str(exchange_rate))
 
-        # Remark — detailed breakdown
+        # Remark — full structured breakdown
         remark_text = rows[0].get("remark", "")
         if remark_text:
             remark_el = await page.query_selector('textarea[name="remark"]')
@@ -749,30 +770,54 @@ async def fill_company_expense(
             logger.info("fill_company_expense: setting company=%s", company_name)
             await _js_select_option(page, 'select[name="charges[id_company_charges_agent]"]', company_name)
             company_selected = True
-            await asyncio.sleep(1)
+            await asyncio.sleep(2)
 
         # Payment method dropdown
         if payment_method:
             logger.info("fill_company_expense: setting payment_method=%s", payment_method)
             await _js_select_option(page, 'select[name="charges[payment_type]"]', payment_method)
 
-        # Pay to / supplier name (ชื่อ/บริษัทที่สั่งจ่าย)
-        # Only fill manually if company dropdown was NOT set (since it auto-fills)
-        if supplier_name and not company_selected:
+        # Pay to / supplier name (สั่งจ่ายชื่อ/บริษัทที่สั่งจ่าย)
+        # MUST be filled AFTER the company dropdown, because the dropdown's
+        # onchange JS auto-fills pay_name with the company name.
+        # We overwrite it with the actual supplier from the invoice.
+        if supplier_name:
             logger.info("fill_company_expense: setting supplier=%s", supplier_name[:50])
-            pay_el = await page.query_selector('input[name="pay_name"]')
-            if not pay_el:
-                pay_el = await page.query_selector('input[name="charges[pay_name]"]')
-            if not pay_el:
-                pay_el = await page.query_selector('input[name="charges[company_name]"]')
+            await asyncio.sleep(1)
+            pay_selectors = [
+                'input[name="pay_name"]',
+                'input[name="charges[pay_name]"]',
+                'input[name="charges[company_name]"]',
+            ]
+            pay_el = None
+            for sel in pay_selectors:
+                pay_el = await page.query_selector(sel)
+                if pay_el:
+                    logger.info("fill_company_expense: found supplier input at %s", sel)
+                    break
+
             if pay_el:
+                await pay_el.click()
                 await pay_el.fill("")
-                await pay_el.fill(supplier_name)
-                logger.info("fill_company_expense: supplier filled OK")
+                await asyncio.sleep(0.3)
+                await pay_el.type(supplier_name, delay=30)
+                verify = await pay_el.input_value()
+                logger.info("fill_company_expense: supplier verify='%s'", verify[:60] if verify else "")
+                if not verify or verify.strip() != supplier_name.strip():
+                    logger.warning("fill_company_expense: supplier verify mismatch, retrying with JS")
+                    await page.evaluate(
+                        """(args) => {
+                            const [selector, val] = args;
+                            const el = document.querySelector(selector);
+                            if (el) { el.value = val; el.dispatchEvent(new Event('input', {bubbles:true})); }
+                        }""",
+                        [pay_selectors[0], supplier_name],
+                    )
             else:
-                logger.warning("fill_company_expense: pay_name input NOT FOUND")
-        elif company_selected:
-            logger.info("fill_company_expense: supplier field auto-populated from company dropdown")
+                logger.warning("fill_company_expense: pay_name input NOT FOUND on page")
+                await manager.screenshot("pay_name_not_found")
+        else:
+            logger.info("fill_company_expense: no supplier name provided, leaving pay_name as-is")
 
         # Agent name
         if agent_name:
@@ -878,35 +923,245 @@ async def extract_order_number(session_id: str = "default") -> dict:
     page = await manager.get_page()
 
     try:
+        # Wait for page to settle after submit redirect
+        try:
+            await page.wait_for_load_state("domcontentloaded", timeout=10000)
+        except Exception:
+            logger.warning("extract_order_number: page load wait timed out, continuing")
+
         # Strategy 1: Read the charges_no field
-        charges_el = await page.query_selector('#charges_no')
-        if charges_el:
-            value = await charges_el.input_value()
-            if value and value.strip() and value.strip() != "C2021XX-XXXX":
-                logger.info("Extracted expense number from field: %s", value)
-                return {"status": "success", "expense_number": value.strip()}
+        try:
+            charges_el = await asyncio.wait_for(
+                page.query_selector('#charges_no'), timeout=5)
+            if charges_el:
+                value = await asyncio.wait_for(
+                    charges_el.input_value(), timeout=5)
+                if value and value.strip() and value.strip() != "C2021XX-XXXX":
+                    logger.info("Extracted expense number from field: %s", value)
+                    return {"status": "success", "expense_number": value.strip()}
+        except (asyncio.TimeoutError, Exception) as e:
+            logger.warning("extract_order_number: strategy 1 failed: %s", e)
 
-        # Strategy 2: Regex on page text
-        page_text = await page.inner_text("body")
-        pattern = r"C\d{6}-\d{4,6}"
-        matches = re.findall(pattern, page_text)
-        if matches:
-            expense_no = matches[-1]
-            logger.info("Extracted expense number (regex): %s", expense_no)
-            return {"status": "success", "expense_number": expense_no}
+        # Strategy 2: Regex on page text (with timeout to prevent hang)
+        try:
+            page_text = await asyncio.wait_for(
+                page.inner_text("body"), timeout=10)
+            pattern = r"C\d{6}-\d{4,6}"
+            matches = re.findall(pattern, page_text)
+            if matches:
+                expense_no = matches[-1]
+                logger.info("Extracted expense number (regex): %s", expense_no)
+                return {"status": "success", "expense_number": expense_no}
+        except (asyncio.TimeoutError, Exception) as e:
+            logger.warning("extract_order_number: strategy 2 failed: %s", e)
 
-        # Strategy 3: Success alert
+        # Strategy 3: URL-based extraction (charges/manage/{id})
+        current_url = page.url
+        url_match = re.search(r'/charges(?:_group)?/(?:manage|edit)/(\d+)', current_url)
+        if url_match:
+            expense_id = url_match.group(1)
+            logger.info("Extracted expense ID from URL: %s", expense_id)
+            return {"status": "success", "expense_number": expense_id}
+
+        # Strategy 4: Success alert
         for sel in [".alert-success", ".alert.alert-success"]:
-            el = await page.query_selector(sel)
-            if el:
-                text = await el.inner_text()
-                return {"status": "success", "expense_number": "UNKNOWN", "message": text}
+            try:
+                el = await asyncio.wait_for(
+                    page.query_selector(sel), timeout=3)
+                if el:
+                    text = await asyncio.wait_for(el.inner_text(), timeout=3)
+                    return {"status": "success", "expense_number": "UNKNOWN", "message": text}
+            except (asyncio.TimeoutError, Exception):
+                continue
 
-        await manager.screenshot("extract_number_failed")
+        try:
+            await manager.screenshot("extract_number_failed")
+        except Exception:
+            pass
         return {"status": "partial", "expense_number": "UNKNOWN", "message": "Submitted but could not read expense number"}
 
     except Exception as e:
         logger.error("Order number extraction failed: %s", e)
+        return {"status": "failed", "message": str(e)}
+
+
+async def navigate_to_manage_page(session_id: str = "default") -> dict:
+    """
+    After form submission, find and click the 'ไปยังหน้าค่าใช้จ่าย' link
+    to navigate to /charges/manage/{id}.
+    Returns the manage page URL and expense ID.
+    """
+    manager = BrowserManager.get_instance(session_id)
+    page = await manager.get_page()
+
+    try:
+        link_selectors = [
+            'a[href*="/charges/manage/"]:has-text("ไปยังหน้าค่าใช้จ่าย")',
+            'a[href*="/charges/manage/"]',
+            'a.btn-primary[href*="/charges/manage/"]',
+        ]
+
+        manage_href = None
+        for sel in link_selectors:
+            try:
+                el = await page.query_selector(sel)
+                if el:
+                    manage_href = await el.get_attribute("href")
+                    if manage_href:
+                        break
+            except Exception:
+                continue
+
+        if not manage_href:
+            page_html = await page.content()
+            match = re.search(r'href="(/charges/manage/\d+)"', page_html)
+            if match:
+                manage_href = match.group(1)
+
+        if not manage_href:
+            await manager.screenshot("manage_link_not_found")
+            return {"status": "failed", "message": "Could not find manage page link"}
+
+        expense_id = re.search(r'/charges/manage/(\d+)', manage_href)
+        expense_id = expense_id.group(1) if expense_id else "unknown"
+
+        full_url = manage_href if manage_href.startswith("http") else f"{Config.WEBSITE_URL.rstrip('/')}{manage_href}"
+        logger.info("Navigating to manage page: %s", full_url)
+
+        try:
+            await page.goto(full_url, wait_until="commit", timeout=15000)
+            logger.info("navigate_to_manage_page: page.goto completed (commit)")
+        except Exception as nav_err:
+            logger.warning("navigate_to_manage_page: goto timed out or failed: %s, retrying with networkidle skip", nav_err)
+            try:
+                await page.goto(full_url, wait_until="domcontentloaded", timeout=10000)
+            except Exception:
+                logger.warning("navigate_to_manage_page: second goto also failed, continuing anyway")
+
+        await asyncio.sleep(2)
+        logger.info("navigate_to_manage_page: sleep done, taking screenshot")
+        await manager.screenshot("manage_page_loaded")
+        logger.info("On manage page for expense_id=%s", expense_id)
+        return {"status": "success", "expense_id": expense_id, "url": full_url}
+
+    except Exception as e:
+        logger.error("navigate_to_manage_page failed: %s", e, exc_info=True)
+        return {"status": "failed", "message": str(e)}
+
+
+async def fill_manage_page_details(
+    company_name: str = "",
+    supplier_name: str = "",
+    session_id: str = "default",
+) -> dict:
+    """
+    On the /charges/manage/{id} page, select the company from the dropdown
+    and fill the supplier name (สั่งจ่ายชื่อ/บริษัทที่สั่งจ่าย).
+
+    Args:
+        company_name: Company to select (e.g. "Go365Travel", "GO 365 TRAVEL")
+        supplier_name: Pay-to / supplier name
+    """
+    manager = BrowserManager.get_instance(session_id)
+    page = await manager.get_page()
+
+    try:
+        await _dismiss_overlays(page)
+
+        if company_name:
+            logger.info("fill_manage_page: selecting company=%s", company_name)
+            company_selectors = [
+                'select[name="id_company_charges_agent"]',
+                'select[name="charges[id_company_charges_agent]"]',
+                'select.selectpicker[data-live-search="true"]',
+            ]
+            selected = False
+            for sel in company_selectors:
+                try:
+                    el = await page.query_selector(sel)
+                    if el:
+                        result = await _js_select_option(page, sel, company_name)
+                        logger.info("Company select result (%s): %s", sel, result)
+                        selected = True
+                        await asyncio.sleep(1)
+                        break
+                except Exception as e:
+                    logger.debug("Company selector %s failed: %s", sel, e)
+                    continue
+
+            if not selected:
+                logger.warning("fill_manage_page: could not find company dropdown")
+
+        if supplier_name:
+            logger.info("fill_manage_page: filling supplier=%s", supplier_name[:60])
+            await asyncio.sleep(0.5)
+            supplier_selectors = [
+                'input[name="pay_name"]',
+                'input[name="charges[pay_name]"]',
+                'input[name="charges[company_name]"]',
+            ]
+            filled = False
+            for sel in supplier_selectors:
+                try:
+                    el = await page.query_selector(sel)
+                    if el:
+                        await el.fill("")
+                        await el.fill(supplier_name)
+                        logger.info("Supplier filled via %s", sel)
+                        filled = True
+                        break
+                except Exception as e:
+                    logger.debug("Supplier selector %s failed: %s", sel, e)
+                    continue
+
+            if not filled:
+                logger.warning("fill_manage_page: pay_name input NOT FOUND, trying label search")
+                try:
+                    label = await page.query_selector('label:has-text("สั่งจ่าย")')
+                    if label:
+                        label_for = await label.get_attribute("for")
+                        if label_for:
+                            inp = await page.query_selector(f"#{label_for}")
+                            if inp:
+                                await inp.fill("")
+                                await inp.fill(supplier_name)
+                                filled = True
+                                logger.info("Supplier filled via label for=%s", label_for)
+                except Exception as e:
+                    logger.debug("Label-based supplier fill failed: %s", e)
+
+            if not filled:
+                logger.warning("fill_manage_page: supplier name NOT filled")
+
+        save_selectors = [
+            'input[type="submit"][value="Save"]',
+            'input[type="submit"]',
+            'button:has-text("Save")',
+            'button:has-text("บันทึก")',
+        ]
+        for sel in save_selectors:
+            try:
+                btn = await page.query_selector(sel)
+                if btn and await btn.is_visible():
+                    await btn.click()
+                    logger.info("fill_manage_page: clicked save via %s", sel)
+                    try:
+                        await page.wait_for_load_state("domcontentloaded", timeout=10000)
+                    except Exception:
+                        pass
+                    await asyncio.sleep(2)
+                    break
+            except Exception:
+                continue
+
+        await manager.screenshot("manage_page_filled")
+        return {
+            "status": "success",
+            "message": f"Manage page updated: company={company_name}, supplier={supplier_name[:40]}",
+        }
+
+    except Exception as e:
+        logger.error("fill_manage_page_details failed: %s", e, exc_info=True)
         return {"status": "failed", "message": str(e)}
 
 
@@ -959,23 +1214,40 @@ async def scrape_table_data(page=None, session_id: str = "default") -> list:
 # ---------------------------------------------------------------------------
 
 async def _js_select_option(page, selector: str, value: str):
-    """Select an <option> by value using pure JS — reliable fallback when Bootstrap dropdown hangs."""
+    """Select an <option> by value using pure JS with fuzzy matching.
+    Handles case-insensitive comparison and normalizes spaces/digits
+    (e.g. 'Go365Travel' matches 'GO 365 TRAVEL CO., LTD.')."""
     safe_val = value.replace("\\", "\\\\").replace("'", "\\'")
     safe_sel = selector.replace("\\", "\\\\").replace("'", "\\'")
     result = await page.evaluate(f"""
     (function() {{
         var sel = document.querySelector('{safe_sel}');
         if (!sel) return 'not_found';
+        var needle = '{safe_val}'.toLowerCase().replace(/[\\s.,']+/g, '');
+        var bestIdx = -1;
+        var bestScore = 0;
         for (var i = 0; i < sel.options.length; i++) {{
-            if (sel.options[i].value === '{safe_val}' || sel.options[i].text.indexOf('{safe_val}') >= 0) {{
-                sel.selectedIndex = i;
-                sel.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                // Also refresh Bootstrap selectpicker if present
-                if (typeof jQuery !== 'undefined' && jQuery(sel).selectpicker) {{
-                    jQuery(sel).selectpicker('refresh');
-                }}
-                return 'selected:' + sel.options[i].text;
+            var optVal = (sel.options[i].value || '').toLowerCase().replace(/[\\s.,']+/g, '');
+            var optTxt = (sel.options[i].text || '').toLowerCase().replace(/[\\s.,']+/g, '');
+            if (optVal === needle || optTxt === needle) {{
+                bestIdx = i; break;
             }}
+            if (optTxt.indexOf(needle) >= 0 || optVal.indexOf(needle) >= 0) {{
+                var score = needle.length;
+                if (score > bestScore) {{ bestScore = score; bestIdx = i; }}
+            }}
+            if (needle.indexOf(optTxt) >= 0 && optTxt.length > 3) {{
+                var score2 = optTxt.length;
+                if (score2 > bestScore) {{ bestScore = score2; bestIdx = i; }}
+            }}
+        }}
+        if (bestIdx >= 0) {{
+            sel.selectedIndex = bestIdx;
+            sel.dispatchEvent(new Event('change', {{ bubbles: true }}));
+            if (typeof jQuery !== 'undefined' && jQuery(sel).selectpicker) {{
+                jQuery(sel).selectpicker('refresh');
+            }}
+            return 'selected:' + sel.options[bestIdx].text;
         }}
         return 'no_match';
     }})()

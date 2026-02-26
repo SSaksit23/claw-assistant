@@ -7,6 +7,7 @@
 let socket = null;
 let uploadedFilePath = null;
 let isConnected = false;
+let selectedExpenseType = null;
 
 // --- DOM Elements ---
 const chatMessages = document.getElementById('chatMessages');
@@ -63,6 +64,14 @@ function initSocket() {
         } else {
             appendMessage('agent', data.content, data.agent || 'ClawBot');
         }
+        if (data.agent && data.agent !== 'Assignment Agent') {
+            selectedExpenseType = null;
+        }
+    });
+
+    socket.on('expense_review', (data) => {
+        removeTypingIndicator();
+        renderExpenseReview(data.content, data.agent || 'Accounting Agent', data.job_id, data.data);
     });
 
     socket.on('agent_status', (data) => {
@@ -72,6 +81,17 @@ function initSocket() {
     socket.on('agent_progress', (data) => {
         removeTypingIndicator();
         appendMessage('system', data.message, data.agent || 'ClawBot');
+    });
+
+    socket.on('agent_question', (data) => {
+        removeTypingIndicator();
+        appendMessage('agent', `**${data.question}**`, data.agent || 'Accounting Agent');
+        messageInput.focus();
+    });
+
+    socket.on('type_selection', (data) => {
+        removeTypingIndicator();
+        renderTypeSelection(data.prompt || 'Please select the expense type:', data.agent || 'Assignment Agent');
     });
 }
 
@@ -93,10 +113,14 @@ function sendMessage() {
     }
 
     // Send to server
-    socket.emit('user_message', {
+    const payload = {
         message: message,
-        file_path: uploadedFilePath
-    });
+        file_path: uploadedFilePath,
+    };
+    if (selectedExpenseType) {
+        payload.expense_type = selectedExpenseType;
+    }
+    socket.emit('user_message', payload);
 
     // Clear input
     messageInput.value = '';
@@ -109,6 +133,169 @@ function sendMessage() {
     }
 
     showTypingIndicator();
+}
+
+function renderTypeSelection(prompt, sender) {
+    const types = [
+        { id: 'flight',    label: 'Air Ticket',           icon: '✈' },
+        { id: 'land_tour', label: 'Tour Fare',            icon: '🗺' },
+        { id: 'insurance', label: 'Insurance',            icon: '🛡' },
+        { id: 'misc',      label: 'Misc / เบ็ดเตล็ด',     icon: '📋' },
+    ];
+
+    const wrapper = document.createElement('div');
+    wrapper.className = 'flex gap-3 max-w-3xl mx-auto';
+
+    const buttonsHtml = types.map(t =>
+        `<button class="type-select-btn" data-type="${t.id}">
+            <span class="type-icon">${t.icon}</span>
+            <span class="type-label">${t.label}</span>
+        </button>`
+    ).join('');
+
+    wrapper.innerHTML = `
+        <div class="w-8 h-8 rounded-lg bg-primary-600 flex items-center justify-center shrink-0 text-sm font-bold">${sender.charAt(0)}</div>
+        <div class="message-bubble agent">
+            <p class="font-semibold text-primary-400 text-sm mb-1">${sender}</p>
+            <div class="prose prose-invert prose-sm mb-3">${renderContent(prompt)}</div>
+            <div class="type-select-group">${buttonsHtml}</div>
+        </div>
+    `;
+
+    chatMessages.appendChild(wrapper);
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+
+    wrapper.querySelectorAll('.type-select-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const chosen = btn.dataset.type;
+            selectedExpenseType = chosen;
+
+            wrapper.querySelectorAll('.type-select-btn').forEach(b => {
+                b.classList.toggle('selected', b.dataset.type === chosen);
+                b.disabled = true;
+            });
+
+            const labelEl = btn.querySelector('.type-label');
+            appendMessage('user', `Selected: ${labelEl.textContent.trim()}`, 'You');
+
+            socket.emit('user_message', {
+                message: `[TYPE:${chosen}] ${labelEl.textContent.trim()} selected`,
+                expense_type: chosen,
+            });
+            showTypingIndicator();
+        });
+    });
+}
+
+function renderExpenseReview(content, sender, jobId, data) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'flex gap-3 max-w-3xl mx-auto';
+
+    const codeGroups = (data && data.code_groups) || [];
+
+    let codeGroupsHtml = '';
+    if (codeGroups.length > 0) {
+        codeGroupsHtml = `<div class="review-code-groups" style="margin-bottom:10px;">
+            <p style="font-size:0.8rem; color:rgba(255,255,255,0.5); margin-bottom:6px;">Code Group(s) — edit if needed:</p>
+            ${codeGroups.map((g, i) => `
+                <div style="display:flex; align-items:center; gap:6px; margin-bottom:4px;">
+                    <span style="font-size:0.8rem; color:rgba(255,255,255,0.4); min-width:18px;">${i + 1}.</span>
+                    <input type="text" class="review-code-input" data-key="${g.key}"
+                        value="${g.display}"
+                        style="flex:1; padding:4px 8px; border-radius:5px; border:1px solid rgba(255,255,255,0.15);
+                        background:rgba(255,255,255,0.05); color:inherit; font-size:0.85rem; font-family:monospace;" />
+                </div>
+            `).join('')}
+        </div>`;
+    }
+
+    wrapper.innerHTML = `
+        <div class="w-8 h-8 rounded-lg bg-primary-600 flex items-center justify-center shrink-0 text-sm font-bold">${sender.charAt(0)}</div>
+        <div class="message-bubble agent">
+            <p class="font-semibold text-primary-400 text-sm mb-1">${sender}</p>
+            <div class="prose prose-invert prose-sm mb-3">${renderContent(content)}</div>
+            <div class="review-form" style="margin-top:12px; border-top:1px solid rgba(255,255,255,0.1); padding-top:12px;">
+                ${codeGroupsHtml}
+                <div class="review-actions" style="display:flex; gap:8px;">
+                    <input type="text" class="review-company-input" placeholder="Company name (e.g. Go365Travel)"
+                        style="flex:1; padding:6px 10px; border-radius:6px; border:1px solid rgba(255,255,255,0.15);
+                        background:rgba(255,255,255,0.05); color:inherit; font-size:0.875rem;" />
+                    <button class="review-confirm-btn"
+                        style="padding:6px 16px; border-radius:6px; background:#22c55e; color:#fff;
+                        font-weight:600; font-size:0.875rem; border:none; cursor:pointer;">
+                        Confirm
+                    </button>
+                    <button class="review-cancel-btn"
+                        style="padding:6px 16px; border-radius:6px; background:#ef4444; color:#fff;
+                        font-weight:600; font-size:0.875rem; border:none; cursor:pointer;">
+                        Cancel
+                    </button>
+                </div>
+            </div>
+        </div>
+    `;
+
+    chatMessages.appendChild(wrapper);
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+
+    const companyInput = wrapper.querySelector('.review-company-input');
+    const confirmBtn = wrapper.querySelector('.review-confirm-btn');
+    const cancelBtn = wrapper.querySelector('.review-cancel-btn');
+    const formDiv = wrapper.querySelector('.review-form');
+
+    confirmBtn.addEventListener('click', () => {
+        const company = companyInput.value.trim();
+        if (!company) {
+            companyInput.style.borderColor = '#ef4444';
+            companyInput.focus();
+            return;
+        }
+
+        // Collect code group overrides (only changed values)
+        const overrides = {};
+        let hasOverrides = false;
+        wrapper.querySelectorAll('.review-code-input').forEach(input => {
+            const origKey = input.dataset.key;
+            const origDisplay = codeGroups.find(g => g.key === origKey)?.display || origKey;
+            const newVal = input.value.trim();
+            if (newVal && newVal !== origDisplay) {
+                overrides[origKey] = newVal;
+                hasOverrides = true;
+            }
+        });
+
+        let summary = `Company: ${company}`;
+        if (hasOverrides) {
+            const changes = Object.entries(overrides).map(([k, v]) => {
+                const orig = codeGroups.find(g => g.key === k)?.display || k;
+                return `${orig} → ${v}`;
+            }).join(', ');
+            summary += ` | Code changes: ${changes}`;
+        }
+
+        formDiv.innerHTML = `<p style="color:#22c55e; font-weight:600; font-size:0.875rem;">Confirmed — ${summary}</p>`;
+        appendMessage('user', `${summary} — Confirmed`, 'You');
+        socket.emit('expense_review_confirm', {
+            company_name: company,
+            job_id: jobId,
+            code_group_overrides: hasOverrides ? overrides : null,
+        });
+        showTypingIndicator();
+    });
+
+    cancelBtn.addEventListener('click', () => {
+        formDiv.innerHTML = `<p style="color:#ef4444; font-weight:600; font-size:0.875rem;">Review cancelled</p>`;
+        appendMessage('user', 'Cancelled expense review', 'You');
+    });
+
+    companyInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            confirmBtn.click();
+        }
+    });
+
+    companyInput.focus();
 }
 
 function sendQuickAction(text) {

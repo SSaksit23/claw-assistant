@@ -26,13 +26,18 @@ EXPENSE_FIELDS = {
     "tour_code": "Tour/group code (e.g., GO1TAO5NTAOQW260304)",
     "program_code": "Program code for the travel program",
     "travel_date": "Travel date or date range (e.g., 0304-0309 or 10-13 Mar)",
+    "travel_date_start": "Start date of travel (dd/mm/yyyy)",
+    "travel_date_end": "End date of travel (dd/mm/yyyy)",
     "pax": "Number of passengers / group size",
     "unit_price": "Price per person/unit",
-    "amount": "Total expense amount (unit_price x pax)",
+    "quantity": "Extra multiplier beyond pax (e.g., number of days, nights)",
+    "amount": "Total expense amount (unit_price x pax x quantity)",
     "currency": "Detected currency (CNY, THB, USD, etc.)",
     "supplier_name": "Supplier / company name (Party A / 甲方)",
-    "description": "Description of the expense (flight route, service name, etc.)",
-    "charge_type": "Type: flight, land_tour, single_supplement, service_fee, guide_tip, visa, accommodation, meal, transport, insurance, entrance_fee, other",
+    "description": "Original description text (Chinese or English as-is)",
+    "expense_label": "English name for expense (e.g., Airline Ticket, Tour Fare, Guide Fee)",
+    "charge_type": "Type: flight, land_tour, single_supplement, service_fee, guide_tip, visa, accommodation, meal, transport, insurance, entrance_fee, commission, other",
+    "calculation_note": "Human-readable calculation string (e.g., '2,380 x 20 pax = 47,600')",
 }
 
 
@@ -115,9 +120,14 @@ COLUMN_MAP = {
     "สกุลเงิน": "currency",
     "เรท": "exchange_rate",
     "หมายเหตุ": "remark",
+    # Chinese column names
+    "编号": "_seq",
+    "航班日期": "travel_date",
+    "备注": "description",
     # English aliases
     "tour_code": "tour_code",
     "group_code": "tour_code",
+    "code": "tour_code",
     "program_code": "program_code",
     "travel_date": "travel_date",
     "date": "travel_date",
@@ -127,7 +137,10 @@ COLUMN_MAP = {
     "amount": "amount",
     "price": "amount",
     "total": "amount",
+    "fare": "unit_price",
+    "unit_price": "unit_price",
     "description": "description",
+    "remark": "description",
     "type": "charge_type",
     "currency": "currency",
 }
@@ -150,18 +163,56 @@ def _dataframe_to_records(df: pd.DataFrame, file_type: str) -> dict:
             df.rename(columns={col: mapped}, inplace=True)
             field_mapping[col_stripped] = mapped
 
+    # Drop internal-only columns
+    if "_seq" in df.columns:
+        df.drop(columns=["_seq"], inplace=True)
+
     # Clean data
     if "tour_code" in df.columns:
         df["tour_code"] = df["tour_code"].astype(str).str.strip()
     if "amount" in df.columns:
         df["amount"] = pd.to_numeric(df["amount"], errors="coerce")
+    if "unit_price" in df.columns:
+        df["unit_price"] = pd.to_numeric(df["unit_price"], errors="coerce")
     if "pax" in df.columns:
         df["pax"] = pd.to_numeric(df["pax"], errors="coerce").fillna(0).astype(int)
+
+    # Calculate amount from unit_price * pax if amount column is missing or NaN
+    if "unit_price" in df.columns and "pax" in df.columns:
+        if "amount" not in df.columns:
+            df["amount"] = df["unit_price"] * df["pax"]
+        else:
+            mask = df["amount"].isna() & df["unit_price"].notna() & df["pax"].notna()
+            df.loc[mask, "amount"] = df.loc[mask, "unit_price"] * df.loc[mask, "pax"]
+
+    # Infer charge_type from Chinese description keywords
+    _DESC_TO_CHARGE = {
+        "机票": "flight", "票款": "flight", "航班": "flight",
+        "团费": "land_tour", "地接": "land_tour",
+        "签证": "visa", "保险": "insurance",
+        "酒店": "accommodation", "住宿": "accommodation",
+        "餐费": "meal", "车费": "transport",
+        "门票": "entrance_fee", "导游": "guide_tip", "小费": "guide_tip",
+        "服务费": "service_fee", "单房差": "single_supplement",
+    }
+    if "description" in df.columns and ("charge_type" not in df.columns or df["charge_type"].isna().all()):
+        def _infer_charge(desc):
+            if not isinstance(desc, str):
+                return "other"
+            for keyword, ct in _DESC_TO_CHARGE.items():
+                if keyword in desc:
+                    return ct
+            return "other"
+        df["charge_type"] = df["description"].apply(_infer_charge)
 
     # Set defaults
     for col, default in [("currency", "THB"), ("charge_type", "other"), ("exchange_rate", 1.0)]:
         if col not in df.columns:
             df[col] = default
+
+    # Drop continuation rows (NaN tour_code) -- e.g., multi-leg flights
+    if "tour_code" in df.columns:
+        df = df[~df["tour_code"].isin(["nan", "None", ""])].copy()
 
     # Validate and collect records
     records = []
@@ -169,9 +220,9 @@ def _dataframe_to_records(df: pd.DataFrame, file_type: str) -> dict:
     for idx, row in df.iterrows():
         record = row.to_dict()
 
-        # Basic validation
         row_errors = []
-        if not record.get("tour_code") or str(record.get("tour_code", "")).strip() in ("", "nan"):
+        tc = str(record.get("tour_code", "")).strip()
+        if not tc or tc in ("nan", "None", ""):
             row_errors.append("Missing tour_code")
         if pd.isna(record.get("amount")) or record.get("amount", 0) <= 0:
             row_errors.append(f"Invalid amount: {record.get('amount')}")
@@ -179,7 +230,6 @@ def _dataframe_to_records(df: pd.DataFrame, file_type: str) -> dict:
         if row_errors:
             errors.append(f"Row {idx + 1}: {'; '.join(row_errors)}")
         else:
-            # Clean NaN values
             clean_record = {}
             for k, v in record.items():
                 if pd.isna(v):
@@ -248,12 +298,42 @@ def _parse_docx(file_path: str) -> dict:
         if para.text.strip():
             text_parts.append(para.text)
 
-    for table in doc.tables:
+    def _extract_table(table, depth=0):
+        """Recursively extract text from tables, including nested tables."""
+        prefix = "  " * depth
         for row in table.rows:
             cells = [cell.text.strip() for cell in row.cells]
-            text_parts.append(" | ".join(cells))
+            text_parts.append(prefix + " | ".join(cells))
+            # Also check for nested tables inside each cell
+            for cell in row.cells:
+                for nested_table in cell.tables:
+                    _extract_table(nested_table, depth + 1)
+
+    for table in doc.tables:
+        _extract_table(table)
+
+    # Also extract text from headers/footers
+    for section in doc.sections:
+        try:
+            for para in section.header.paragraphs:
+                if para.text.strip():
+                    text_parts.append(para.text)
+        except Exception:
+            pass
+        try:
+            for para in section.footer.paragraphs:
+                if para.text.strip():
+                    text_parts.append(para.text)
+        except Exception:
+            pass
 
     raw_text = "\n".join(text_parts)
+    logger.info("DOCX extracted %d text parts, %d chars total", len(text_parts), len(raw_text))
+    if len(raw_text) < 200:
+        logger.info("DOCX full text: %s", raw_text)
+    else:
+        logger.info("DOCX first 500 chars: %s", raw_text[:500])
+
     if not raw_text.strip():
         return {"status": "error", "errors": ["No text extracted from DOCX"], "records": [], "raw_text": ""}
 
@@ -283,10 +363,15 @@ def _extract_records_with_llm(raw_text: str, file_type: str) -> dict:
 
     prompt = f"""Extract expense/charge records from the following document text.
 
-Also identify the **supplier name** — the ACTUAL company or person name that provides the service.
-IMPORTANT: Do NOT return generic contract roles like "甲方" (Party A) or "乙方" (Party B).
-Instead, find the real company name in the document (e.g., "昆明XX旅行社", "泰国XX公司").
-If you cannot find a specific name, return an empty string "".
+## SUPPLIER NAME (CRITICAL)
+Identify the **supplier name** — the company or person to PAY.
+- Do NOT return generic contract roles like "甲方" (Party A) or "乙方" (Party B).
+- For Chinese documents: find the real company name (e.g., "昆明XX旅行社").
+- For Thai invoices: the supplier is the company whose BANK ACCOUNT appears at the bottom
+  (e.g., "บริษัท เบสท์อินเตอร์เนชั่นแนลทราเวลแอนด์เอเจนซี่ จำกัด").
+  The company in the HEADER may be the *issuer/wholesaler*, not the pay-to party.
+  When in doubt, use the company with the bank account as supplier_name.
+- If you cannot find a specific name, return an empty string "".
 
 ## CURRENCY DETECTION (CRITICAL)
 Detect the ACTUAL currency from the document. Do NOT default to THB.
@@ -299,37 +384,116 @@ Look for these clues:
 - "KRW", "₩", "韩元" -> currency = "KRW"
 - If the amount summary shows "(RMB)" or "元" or mentions Chinese bank accounts only -> "CNY"
 - If the supplier is a Chinese company with Chinese bank accounts -> likely "CNY"
-- Only use "THB" if explicitly stated or if the document is clearly in Thai
+- If the document is clearly in Thai with Thai Baht amounts -> "THB"
 
 ## EXPENSE LINE ITEMS
-Extract EACH expense line item as a SEPARATE record. Common items:
-- 团费 / tour fare -> charge_type = "land_tour"
-- 单房差 / single room supplement -> charge_type = "single_supplement"
-- 服务费 / service fee -> charge_type = "service_fee"
-- 导游费 / guide fee / 小费 / tips / 导服费 -> charge_type = "guide_tip"
-- 机票 / 票价 / flight / airfare -> charge_type = "flight"
-- 签证费 / visa fee -> charge_type = "visa"
-- 酒店 / hotel / 住宿 / accommodation -> charge_type = "accommodation"
-- 餐费 / meals -> charge_type = "meal"
-- 车费 / transport / 包车 -> charge_type = "transport"
-- 保险 / insurance -> charge_type = "insurance"
-- 门票 / entrance / tickets -> charge_type = "entrance_fee"
-- If unclear, use "other"
+Extract EACH expense line item as a SEPARATE record.
+
+### Chinese expense types:
+- 团费 / tour fare -> charge_type = "land_tour", expense_label = "Tour Fare"
+- 单房差 / single room supplement -> charge_type = "single_supplement", expense_label = "Single Room Supplement"
+- 服务费 / service fee -> charge_type = "service_fee", expense_label = "Service Fee"
+- 导游费 / guide fee / 小费 / tips / 导服费 -> charge_type = "guide_tip", expense_label = "Guide Fee / Tips"
+- 机票 / 票价 / flight / airfare / 机票定金 / 机票押金 -> charge_type = "flight", expense_label = "Airline Ticket"
+- 签证费 / visa fee -> charge_type = "visa", expense_label = "Visa Fee"
+- 酒店 / hotel / 住宿 / accommodation -> charge_type = "accommodation", expense_label = "Accommodation"
+- 餐费 / meals -> charge_type = "meal", expense_label = "Meals"
+- 车费 / transport / 包车 -> charge_type = "transport", expense_label = "Transport"
+- 保险 / insurance -> charge_type = "insurance", expense_label = "Insurance"
+- 门票 / entrance / tickets -> charge_type = "entrance_fee", expense_label = "Entrance Fee"
+- 机票定金 / deposit -> use original type + "(Deposit)" suffix in expense_label
+
+### Thai expense types:
+- ค่าทัวร์ / ค่าทัวร์ผู้ใหญ่ / ค่าทัวร์เด็ก -> charge_type = "land_tour", expense_label = "Tour Fare (Adult)" or "Tour Fare (Child)"
+- ค่าตั๋วเครื่องบิน / ค่ามัดจำตั๋วเครื่องบิน -> charge_type = "flight", expense_label = "Airline Ticket" or "Airline Ticket (Deposit)"
+- ค่าบัตร / ค่าบัตรดีสนีย์แลนด์ / ค่าบัตรเข้าชม -> charge_type = "entrance_fee", expense_label = "Disneyland Ticket (Adult)" / use the actual attraction name
+- ค่าคอมมิชชั่น / หักค่าคอมมิชชั่น -> charge_type = "commission", expense_label = "Commission"
+  IMPORTANT: Commission lines are DEDUCTIONS with NEGATIVE amounts. Use the negative sign.
+- ค่าบริการ -> charge_type = "service_fee", expense_label = "Service Fee"
+- ค่าวีซ่า -> charge_type = "visa", expense_label = "Visa Fee"
+- ค่าโรงแรม / ค่าที่พัก -> charge_type = "accommodation", expense_label = "Accommodation"
+- ค่าอาหาร -> charge_type = "meal", expense_label = "Meals"
+- ค่ารถ / ค่ารถบัส -> charge_type = "transport", expense_label = "Transport"
+- ค่าประกัน -> charge_type = "insurance", expense_label = "Insurance"
+- ค่ามัคคุเทศก์ / ค่าทิป -> charge_type = "guide_tip", expense_label = "Guide Fee / Tips"
+- ค่าห้องพักเดี่ยว -> charge_type = "single_supplement", expense_label = "Single Room Supplement"
+
+If unclear, use charge_type = "other", expense_label = translate the description to English.
+
+## COMMISSION / DEDUCTION HANDLING
+Commission lines (ค่าคอมมิชชั่น, 佣金) are DEDUCTIONS — they have NEGATIVE amounts.
+- Include them as records with charge_type = "commission"
+- The amount MUST be negative (e.g., -2500, not 2500)
+- If the document shows "หักค่าคอมมิชชั่น 500 x 5 = -2,500" -> amount = -2500, unit_price = -500, pax = 5
+
+## DATE EXTRACTION
+- Extract BOTH the start and end dates of travel if available.
+- travel_date_start: First day of travel in dd/mm/yyyy format (e.g., "04/03/2026")
+- travel_date_end: Last day of travel in dd/mm/yyyy format (e.g., "09/03/2026")
+- travel_date: The original date text as-is from the document (for reference)
+
+COMMON DATE FORMATS:
+- "0304-0309" -> mmdd-mmdd -> March 4 to March 9
+- "3月4日-9日" -> March 4-9 (Chinese)
+- "0622-0626" -> June 22 to June 26
+- The YEAR comes from the tour code. If the tour code ends with 260304 (yymmdd),
+  the year is 20yy = 2026.
+
+### Thai dates with Buddhist Era (พ.ศ.)
+Thai years use the Buddhist Era (พ.ศ.), which is 543 years ahead of CE.
+- พ.ศ. 2569 = CE 2026  (2569 - 543 = 2026)
+- พ.ศ. 2568 = CE 2025
+- Month abbreviations: ม.ค.=Jan, ก.พ.=Feb, มี.ค.=Mar, เม.ย.=Apr, พ.ค.=May,
+  มิ.ย.=Jun, ก.ค.=Jul, ส.ค.=Aug, ก.ย.=Sep, ต.ค.=Oct, พ.ย.=Nov, ธ.ค.=Dec
+- Example: "13 มี.ค. 2569 - 18 มี.ค. 2569" -> travel_date_start = "13/03/2026", travel_date_end = "18/03/2026"
+- Example: "วันเดินทาง : 13 มี.ค. 2569" -> start date = 13/03/2026
+
+## TOUR CODE / GROUP CODE
+Look for these keywords:
+- "GROUP CODE", "Group Code", "รหัสกรุ๊ป", "Code group"
+- Chinese: "团号", "组号", "合同号"
+- The value after the keyword is the tour_code (e.g., "GROUP CODE : BTNRTXJ260313W02")
+
+## GROUPING (CRITICAL)
+All line items from the SAME document that belong to the same tour/trip MUST share
+the EXACT same tour_code. Do NOT create different tour_code values for items that
+belong together (e.g., airline ticket deposit + tour fare + commission for the same trip).
+If the document only mentions ONE group/tour code, ALL records must use that SAME code.
+
+EXCEPTION — MULTI-CODE INVOICES:
+Some invoices list MULTIPLE separate tour codes in a table (e.g., 4 different flight
+bookings each with their own code like GO1TAO5NTAOQW260118, GO1TAO5NTAOQW260121, etc.).
+In this case, each row with a DIFFERENT tour code IS a separate group. Preserve the
+distinct tour_code for each row. Do NOT merge them under one code.
+
+## COST CALCULATION STRUCTURE (CRITICAL)
+Preserve HOW the amount is calculated. Many invoices show multi-factor math:
+- Simple: unit_price x pax = amount (e.g., 2,900 x 17 = 49,300)
+- With days: rate x pax x days = amount (e.g., tips 30 x 20 x 7 = 4,200)
+- With quantity: unit_price x pax x quantity = amount (e.g., 20 x 16 x 6 = 1,920)
+- Deductions: negative amounts (e.g., -800 x 1 = -800)
 
 For EACH line item, extract:
-- tour_code: Tour or group code (e.g., GO1TAO5NTAOQW260304). If multiple items share the same tour code, use the SAME code for each.
-- program_code: Program code if available
-- travel_date: Travel date or date range (e.g., "0304-0309")
+- tour_code: Tour or group code. ALL items for the same trip MUST have the EXACT same tour_code string.
+- program_code: Program code if available (e.g., "BT-NRT_W02_XJ")
+- travel_date: Original date text as-is
+- travel_date_start: Start date in dd/mm/yyyy or null
+- travel_date_end: End date in dd/mm/yyyy or null
 - pax: Number of passengers / units for THIS line item
-- unit_price: Price per person/unit (单价)
-- amount: Total for this line (unit_price * pax). Calculate correctly from the document.
-- currency: The detected currency code (see above)
-- description: Original description text (Chinese or English as-is)
-- charge_type: Category from the list above
+- unit_price: Price per person/unit. MUST extract this.
+- quantity: Extra multiplier beyond pax (e.g., number of days, nights, meals). null if not applicable.
+- amount: Total for this line (unit_price * pax * quantity, or unit_price * pax). Use NEGATIVE for commissions/deductions.
+- currency: The detected currency code
+- description: Original description text (Chinese, Thai, or English as-is)
+- expense_label: Human-readable ENGLISH label for the expense type. Translate from Chinese/Thai if needed.
+- charge_type: Category code from the lists above
+- calculation_note: Human-readable string showing the math as it appears in the invoice.
+  Examples: "2,380 x 20 pax = 47,600", "30 x 20 pax x 7 days = 4,200",
+  "650 x 2 rooms = 1,300", "-800 x 1 = -800". ALWAYS include this.
 
 Return ONLY valid JSON in this format:
 {{
-    "supplier_name": "the company/supplier name",
+    "supplier_name": "the company/supplier name (pay-to party)",
     "detected_currency": "CNY or THB or USD etc.",
     "currency_evidence": "brief explanation of how you detected the currency",
     "records": [
@@ -337,12 +501,17 @@ Return ONLY valid JSON in this format:
             "tour_code": "string",
             "program_code": "string or null",
             "travel_date": "string or null",
+            "travel_date_start": "dd/mm/yyyy or null",
+            "travel_date_end": "dd/mm/yyyy or null",
             "pax": number or null,
             "unit_price": number or null,
+            "quantity": number or null,
             "amount": number,
             "currency": "the detected currency",
-            "description": "string",
-            "charge_type": "string from categories above"
+            "description": "string (original text)",
+            "expense_label": "string (English label, e.g. Airline Ticket)",
+            "charge_type": "string from categories above",
+            "calculation_note": "string showing the math (e.g. '2,380 x 20 pax = 47,600')"
         }}
     ],
     "notes": "any observations about the data"
@@ -368,14 +537,18 @@ Document text:
             response_format={"type": "json_object"},
         )
 
-        result = json.loads(response.choices[0].message.content)
+        raw_content = response.choices[0].message.content
+        result = json.loads(raw_content)
         records = result.get("records", [])
         supplier_name = result.get("supplier_name", "")
         detected_currency = result.get("detected_currency", "")
         currency_evidence = result.get("currency_evidence", "")
 
+        logger.info("LLM returned %d records, supplier='%s'", len(records), supplier_name)
         if detected_currency:
             logger.info("Currency detected: %s (evidence: %s)", detected_currency, currency_evidence)
+        if not records:
+            logger.warning("LLM returned 0 records! Raw response (first 500): %s", raw_content[:500])
 
         for rec in records:
             rec["supplier_name"] = supplier_name

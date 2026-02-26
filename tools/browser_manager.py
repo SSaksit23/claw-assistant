@@ -60,6 +60,7 @@ class BrowserManager:
         self._context = None
         self._page = None
         self._logged_in = False
+        self._logged_in_username = None
 
     # ------------------------------------------------------------------
     # Pool management
@@ -200,6 +201,14 @@ class BrowserManager:
     @is_logged_in.setter
     def is_logged_in(self, value: bool):
         self._logged_in = value
+
+    @property
+    def logged_in_username(self) -> Optional[str]:
+        return self._logged_in_username
+
+    @logged_in_username.setter
+    def logged_in_username(self, value: Optional[str]):
+        self._logged_in_username = value
 
     async def screenshot(self, name: str = "screenshot") -> str:
         os.makedirs("logs", exist_ok=True)

@@ -187,6 +187,74 @@
     }
 }
 
+/* Expense type selection buttons */
+.type-select-group {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+
+.type-select-btn {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.625rem 1rem;
+    background: #1e1e2e;
+    border: 1.5px solid #45475a;
+    border-radius: 0.625rem;
+    color: #cdd6f4;
+    font-size: 0.85rem;
+    cursor: pointer;
+    transition: all 0.2s;
+    white-space: nowrap;
+}
+
+.type-select-btn:hover:not(:disabled) {
+    background: #313244;
+    border-color: #89b4fa;
+    color: #89b4fa;
+    transform: translateY(-1px);
+    box-shadow: 0 2px 8px rgba(59, 130, 246, 0.15);
+}
+
+.type-select-btn.selected {
+    background: rgba(59, 130, 246, 0.2);
+    border-color: #3b82f6;
+    color: #89b4fa;
+    font-weight: 600;
+}
+
+.type-select-btn:disabled:not(.selected) {
+    opacity: 0.35;
+    cursor: default;
+}
+
+.type-icon {
+    font-size: 1.1rem;
+}
+
+.type-label {
+    font-size: 0.85rem;
+}
+
+/* Invoice review confirm/cancel actions */
+.review-company-input:focus,
+.review-code-input:focus {
+    outline: none;
+    border-color: #89b4fa !important;
+    box-shadow: 0 0 0 2px rgba(137, 180, 250, 0.2);
+}
+
+.review-confirm-btn:hover {
+    opacity: 0.9;
+    transform: translateY(-1px);
+}
+
+.review-cancel-btn:hover {
+    opacity: 0.9;
+    transform: translateY(-1px);
+}
+
 /* Drop zone active state */
 #dropZone.drag-over {
     border-color: #60a5fa;

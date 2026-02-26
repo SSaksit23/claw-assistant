@@ -62,11 +62,44 @@ SYSTEM_PROMPT = f"""You are the **Assignment Agent** for Web365 ClawBot -- the c
 4. If the user's request is vague, ask a short clarifying question (intent = "general").
 
 ## Specialist capabilities (so you can tell the user what's possible)
-- **Accounting Agent** -- Upload a CSV / Excel / PDF file with tour codes and amounts. The system logs in to qualityb2bpackage.com, fills the charges form, submits, and returns order numbers.
+- **Accounting Agent** -- Two modes:
+  1. **File upload**: Upload a CSV / Excel / PDF / DOCX file with expense data. The system parses
+     the document, logs in to qualityb2bpackage.com, fills the charges form, submits, and returns
+     order numbers.
+  2. **Manual entry**: Type the expense details directly in chat (no file needed). The system
+     extracts the fields from your message and runs the same automation pipeline.
 - **Data Analysis Agent** -- Scrapes the /booking and /report/report_seller pages and returns structured data.
 - **Market Analysis Agent** -- Scrapes /travelpackage, analyses the product catalogue, produces competitive insights. Can also parse uploaded itinerary PDFs and compare them.
 - **Executive Agent** -- Aggregates outputs from all other agents into a strategic report with recommendations.
 - **Admin Agent** -- Lists existing expense records, bookings, or performs lookups on the website.
+
+## Parameter extraction for expense_recording
+When the intent is `expense_recording`, extract ALL available fields from the user's message:
+
+**Required** (ask if missing):
+- **company_name**: Which company this expense belongs to (e.g., "Go365Travel", "2U Center",
+  "GO HOLIDAY TOUR"). Look for phrases like "for Go365Travel", "expense of 2U Center",
+  "ของบริษัท Go365", etc.
+  If the user does NOT specify the company name, set company_name to "" and ask them
+  "Which company should this expense be created for?" in your response. Set delegate to false
+  until they answer.
+
+**For manual entry (no file uploaded)**, also extract these if mentioned:
+- **tour_code**: Group/tour code (e.g., "BTNRTXJ260313W02", "2UCKG3NCKG3U260310B")
+- **program_code**: Program code if different from tour code (e.g., "BT-NRT_W02_XJ")
+- **supplier_name**: Supplier / pay-to company name
+- **amount**: Total amount (calculate from unit_price x pax if not given directly)
+- **unit_price**: Price per person/unit
+- **pax**: Number of passengers / quantity
+- **currency**: THB, CNY, USD, etc. (default THB if not specified)
+- **charge_type**: One of: flight, land_tour, single_supplement, service_fee, guide_tip, visa,
+  accommodation, meal, transport, insurance, entrance_fee, commission, other
+- **expense_label**: English label (e.g., "Airline Ticket", "Tour Fare", "Service Fee")
+- **travel_date**: Travel date range (e.g., "13-18 Mar 2026")
+- **description**: Free-text description / remark
+
+If the user provides a tour_code (with or without a file), set delegate to true.
+If no file AND no tour_code, ask: "Please provide the tour/group code for this expense."
 
 ## Response format
 Always reply with **valid JSON** (nothing else):
@@ -77,12 +110,13 @@ Always reply with **valid JSON** (nothing else):
   "delegate": true | false,
   "task_details": {{{{
     "action": "<what the specialist should do>",
-    "parameters": {{{{ ... }}}}
+    "parameters": {{{{ "company_name": "<extracted or empty string>", ... }}}}
   }}}}
 }}}}
 
 Set `delegate` to **false** when you can answer directly (greetings, help, clarifications).
 Set `delegate` to **true** when a specialist agent should take over.
+For expense_recording: set delegate to **false** if company_name is missing -- ask the user first.
 """
 
 
@@ -164,6 +198,7 @@ def delegate(
     session_id: str = "default",
     website_username: str = None,
     website_password: str = None,
+    expense_type: str = "",
 ) -> dict | None:
     """
     Hand off to the appropriate specialist agent.
@@ -187,18 +222,38 @@ def delegate(
     result = None
     try:
         if intent == "expense_recording":
+            params = task_details.get("parameters", {})
+            company = params.get("company_name", "")
             if file_path:
-                from services.expense_service import start_expense_job
-                result = start_expense_job(
+                from services.expense_service import review_expense_invoice
+                result = review_expense_invoice(
                     file_path=file_path,
+                    emit_fn=emit_fn,
+                    session_id=session_id,
+                    company_name=company,
+                    expense_type=expense_type,
+                )
+            elif params.get("tour_code"):
+                from services.expense_service import start_manual_expense_job
+                result = start_manual_expense_job(
+                    params=params,
                     emit_fn=emit_fn,
                     session_id=session_id,
                     website_username=website_username,
                     website_password=website_password,
+                    company_name=company,
+                    expense_type=expense_type,
                 )
             else:
-                from agents.accounting_agent import handle_expense_task
-                result = handle_expense_task(task_details, file_path, emit_fn)
+                result = {
+                    "content": (
+                        "I need more details to create an expense. Please provide:\n"
+                        "1. **Tour/group code** (e.g., `BTNRTXJ260313W02`)\n"
+                        "2. **Amount** or unit price x pax\n"
+                        "3. **Company name** (e.g., Go365Travel)\n\n"
+                        "Or upload a file (CSV / Excel / PDF / DOCX) with the expense data."
+                    ),
+                }
 
         elif intent == "data_analysis":
             from agents.data_analysis_agent import handle_data_analysis_task

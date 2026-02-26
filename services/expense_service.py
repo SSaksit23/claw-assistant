@@ -19,9 +19,19 @@ import os
 import re
 import json
 import uuid
+import asyncio
 import logging
+import queue as _queue
 from datetime import datetime
 from typing import Optional, Callable
+
+# Get the REAL (unpatched) threading module so Event/Lock work correctly
+# in real OS threads (Playwright thread) even when eventlet is active.
+try:
+    from eventlet.patcher import original as _original
+    _threading = _original("threading")
+except Exception:
+    import threading as _threading
 
 
 from config import Config
@@ -32,6 +42,58 @@ from tools.browser_manager import BrowserManager, run_in_thread
 from tools import browser_tools
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Interactive input: ask the user and wait for their reply
+# ---------------------------------------------------------------------------
+_input_requests: dict[str, dict] = {}
+_input_lock = _threading.Lock()
+
+
+def submit_user_input(session_id: str, text: str):
+    """Called by the websocket handler when the user replies to a pending question."""
+    with _input_lock:
+        req = _input_requests.get(session_id)
+        if req:
+            req["response"] = text
+            req["event"].set()
+            return True
+    return False
+
+
+def has_pending_input(session_id: str) -> bool:
+    """Check whether the expense service is waiting for user input."""
+    with _input_lock:
+        return session_id in _input_requests
+
+
+def _ask_user(emit_fn, session_id: str, question: str, timeout: float = 120) -> str | None:
+    """
+    Emit a question to the user and block until they reply (or timeout).
+
+    Returns the user's answer or None on timeout.
+    """
+    evt = _threading.Event()
+    with _input_lock:
+        _input_requests[session_id] = {"question": question, "response": None, "event": evt}
+
+    _emit(emit_fn, "agent_question", {
+        "agent": "Accounting Agent",
+        "question": question,
+    })
+
+    answered = evt.wait(timeout=timeout)
+
+    with _input_lock:
+        req = _input_requests.pop(session_id, {})
+
+    if answered and req.get("response"):
+        logger.info("User answered: %s", req["response"][:80])
+        return req["response"]
+
+    logger.warning("No user response within %ss for: %s", timeout, question[:60])
+    return None
 
 
 _GENERIC_CONTRACT_TERMS = {"甲方", "乙方", "丙方", "party a", "party b", "party c"}
@@ -56,10 +118,323 @@ def translate_supplier_name(name: str) -> str:
 # In-memory job tracker
 _jobs = {}
 
+# Pending invoice reviews awaiting user confirmation (keyed by session_id)
+_pending_reviews: dict[str, dict] = {}
+_review_lock = _threading.Lock()
+
 
 def get_job(job_id: str) -> Optional[dict]:
     """Get job status by ID."""
     return _jobs.get(job_id)
+
+
+# ---------------------------------------------------------------------------
+# Phase A: Invoice review — parse, analyse, present structured breakdown
+# ---------------------------------------------------------------------------
+
+def review_expense_invoice(
+    file_path: str,
+    emit_fn: Optional[Callable] = None,
+    session_id: str = "default",
+    company_name: str = "",
+    expense_type: str = "",
+) -> dict:
+    """
+    Parse an invoice file and return a structured cost-analysis review
+    grouped by code group. Does NOT start browser automation — the user
+    must confirm via confirm_and_execute_expense() first.
+    """
+    job_id = str(uuid.uuid4())[:8]
+    job_start = datetime.now()
+    _jobs[job_id] = {
+        "id": job_id,
+        "status": "reviewing",
+        "file_path": file_path,
+        "started_at": job_start.isoformat(),
+        "steps": [],
+        "results": [],
+    }
+
+    _emit(emit_fn, "agent_status", {
+        "agent": "Accounting Agent",
+        "status": "working",
+        "message": "Reviewing your invoice...",
+    })
+
+    # Consult past learnings
+    past_context = learning_service.get_relevant_learnings(
+        task_description=f"expense invoice review cost breakdown {file_path}",
+        agent="Accounting Agent",
+        limit=5,
+    )
+    if past_context:
+        logger.info("Consulting past learnings:\n%s", past_context)
+
+    # Step 1: Parse the document
+    _update_job(job_id, "parsing", "Parsing uploaded document...")
+    _emit_timed(emit_fn, job_start, "Document Parser",
+                "**Step 1:** Parsing your invoice...")
+
+    parse_result = parse_file(file_path)
+
+    if parse_result["status"] != "success" or not parse_result.get("records"):
+        error_msg = "; ".join(parse_result.get("errors", ["No data extracted"]))
+        _update_job(job_id, "failed", f"Parsing failed: {error_msg}")
+        return {
+            "content": f"Could not extract expense data from your file.\n\n**Errors:** {error_msg}",
+            "job_id": job_id,
+            "data": parse_result,
+            "review_pending": False,
+        }
+
+    records = parse_result["records"]
+    detected_currency = parse_result.get("detected_currency", "")
+    supplier_name = parse_result.get("supplier_name", "")
+
+    # Step 2: Group by tour_code and build cost breakdown
+    _update_job(job_id, "analyzing", f"Analyzing {len(records)} records by code group...")
+    _emit_timed(emit_fn, job_start, "Accounting Agent",
+                f"**Step 2:** Analyzing cost structure ({len(records)} line items)...")
+
+    grouped = _group_records_by_tour(records, expense_type=expense_type)
+    primary_currency = detected_currency or records[0].get("currency", "THB")
+
+    # Step 3: Build structured review per code group
+    review_sections = []
+    for group_key, items in grouped.items():
+        display_code = group_key.split("__item")[0] if "__item" in group_key else group_key
+        group_supplier = items[0].get("supplier_name", supplier_name) or supplier_name
+        group_currency = items[0].get("currency", primary_currency)
+        subtotal = sum(r.get("amount", 0) for r in items)
+
+        section = f"### Cost Review — `{display_code}`\n\n"
+        section += f"**Supplier:** {group_supplier or '_(not found)_'}\n"
+        section += f"**Company:** {company_name or '_(pending — please provide)_'}\n"
+        section += f"**Code Group:** `{display_code}`\n\n"
+        section += "**Expenses:**\n\n"
+        section += "| # | Type | Calculation | Amount |\n"
+        section += "|---|------|-------------|--------|\n"
+
+        for idx, item in enumerate(items, 1):
+            label = item.get("expense_label") or CHARGE_TYPE_LABELS.get(
+                item.get("charge_type", "other"), item.get("charge_type", "?"))
+            amt = item.get("amount", 0)
+            calc = item.get("calculation_note", "")
+            if not calc:
+                pax = item.get("pax")
+                up = item.get("unit_price")
+                qty = item.get("quantity")
+                calc = _build_calculation_note(up, pax, qty, amt, group_currency)
+            section += f"| {idx} | {label} | {calc} | **{amt:,.0f} {group_currency}** |\n"
+
+        section += f"\n**Total: {subtotal:,.0f} {group_currency}**\n"
+        review_sections.append(section)
+
+    grand_total = sum(r.get("amount", 0) for r in records)
+    review_header = f"## Invoice Review\n\n"
+    review_header += f"**File:** `{os.path.basename(file_path)}`\n"
+    review_header += f"**Groups found:** {len(grouped)} | **Line items:** {len(records)}\n"
+    review_header += f"**Grand Total: {grand_total:,.0f} {primary_currency}**\n\n---\n\n"
+
+    review_body = "\n---\n\n".join(review_sections)
+
+    if not company_name:
+        review_footer = "\n\n---\n\nPlease provide the **company name** and confirm to proceed."
+    else:
+        review_footer = "\n\n---\n\nPlease **confirm** to proceed with expense recording, or type corrections."
+
+    review_content = review_header + review_body + review_footer
+
+    # Save pending review for confirmation
+    with _review_lock:
+        _pending_reviews[session_id] = {
+            "job_id": job_id,
+            "file_path": file_path,
+            "records": records,
+            "grouped": grouped,
+            "parse_result": parse_result,
+            "company_name": company_name,
+            "supplier_name": supplier_name,
+            "expense_type": expense_type,
+            "primary_currency": primary_currency,
+            "created_at": datetime.now().isoformat(),
+        }
+
+    _update_job(job_id, "awaiting_confirmation", "Review presented, waiting for user confirmation")
+    _emit(emit_fn, "agent_status", {
+        "agent": "Accounting Agent",
+        "status": "idle",
+        "message": "Waiting for confirmation",
+    })
+
+    # Build code_groups list for the client to render editable inputs
+    code_groups = []
+    for group_key in grouped:
+        display_code = group_key.split("__item")[0] if "__item" in group_key else group_key
+        code_groups.append({"key": group_key, "display": display_code})
+
+    return {
+        "content": review_content,
+        "job_id": job_id,
+        "data": {
+            "records": records,
+            "grouped_count": len(grouped),
+            "total": grand_total,
+            "currency": primary_currency,
+            "code_groups": code_groups,
+        },
+        "review_pending": True,
+    }
+
+
+def has_pending_review(session_id: str) -> bool:
+    """Check whether there is an invoice review awaiting confirmation."""
+    with _review_lock:
+        return session_id in _pending_reviews
+
+
+def get_pending_review(session_id: str) -> Optional[dict]:
+    """Return the pending review data (without removing it)."""
+    with _review_lock:
+        return _pending_reviews.get(session_id)
+
+
+def confirm_and_execute_expense(
+    session_id: str,
+    emit_fn: Optional[Callable] = None,
+    company_name: str = "",
+    website_username: str = None,
+    website_password: str = None,
+    expense_type: str = "",
+    code_group_overrides: dict = None,
+) -> dict:
+    """
+    Phase B: User confirmed the invoice review — proceed with browser
+    automation using the previously parsed and reviewed data.
+
+    code_group_overrides: optional dict mapping original group key to new
+    tour code, e.g. {"GO1TAO6N...": "NEWTOURCODE123"}.
+    """
+    with _review_lock:
+        pending = _pending_reviews.pop(session_id, None)
+
+    if not pending:
+        return {
+            "content": "No pending invoice review found. Please upload a file first.",
+            "data": None,
+        }
+
+    job_id = pending["job_id"]
+    grouped = pending["grouped"]
+    records = pending["records"]
+    file_path = pending["file_path"]
+    primary_currency = pending["primary_currency"]
+    supplier_name = pending.get("supplier_name", "")
+
+    if not company_name:
+        company_name = pending.get("company_name", "")
+    if not expense_type:
+        expense_type = pending.get("expense_type", "")
+
+    # Apply code group overrides if the user changed any tour codes
+    if code_group_overrides:
+        grouped = _apply_code_group_overrides(grouped, code_group_overrides)
+        for items in grouped.values():
+            for item in items:
+                for old_key, new_code in code_group_overrides.items():
+                    old_display = old_key.split("__item")[0] if "__item" in old_key else old_key
+                    if item.get("tour_code") == old_display and new_code.strip():
+                        item["tour_code"] = new_code.strip()
+        for rec in records:
+            for old_key, new_code in code_group_overrides.items():
+                old_display = old_key.split("__item")[0] if "__item" in old_key else old_key
+                if rec.get("tour_code") == old_display and new_code.strip():
+                    rec["tour_code"] = new_code.strip()
+        logger.info("Code group overrides applied: %s", code_group_overrides)
+
+    job_start = datetime.now()
+    _jobs[job_id]["status"] = "executing"
+    _jobs[job_id]["steps"].append({
+        "status": "confirmed",
+        "message": f"User confirmed. Company: {company_name}",
+        "timestamp": job_start.isoformat(),
+    })
+
+    _emit(emit_fn, "agent_status", {
+        "agent": "Accounting Agent",
+        "status": "working",
+        "message": "Starting expense recording...",
+    })
+
+    _emit_timed(emit_fn, job_start, "Accounting Agent",
+                f"**Confirmed!** Processing {len(grouped)} expense group(s) "
+                f"for **{company_name or 'N/A'}**...")
+
+    # Inject supplier_name and company_name into records for form filling
+    for items in grouped.values():
+        for item in items:
+            if not item.get("supplier_name"):
+                item["supplier_name"] = supplier_name
+            if not item.get("company_name"):
+                item["company_name"] = company_name
+
+    # Save parsed data
+    os.makedirs(Config.DATA_DIR, exist_ok=True)
+    parsed_path = os.path.join(Config.DATA_DIR, f"parsed_{job_id}.json")
+    with open(parsed_path, "w", encoding="utf-8") as f:
+        json.dump({
+            "job_id": job_id,
+            "records": records,
+            "parse_info": pending["parse_result"],
+        }, f, ensure_ascii=False, indent=2)
+
+    # Decide: n8n or direct
+    if n8n_integration.is_n8n_enabled():
+        return _run_via_n8n(job_id, records, emit_fn)
+    else:
+        return _run_direct(
+            job_id, grouped, emit_fn,
+            session_id=session_id,
+            website_username=website_username,
+            website_password=website_password,
+            company_name=company_name,
+            expense_type=expense_type,
+        )
+
+
+def _build_calculation_note(
+    unit_price, pax, quantity, amount, currency: str = ""
+) -> str:
+    """Build a human-readable calculation note from numeric fields."""
+    parts = []
+    if unit_price is not None and unit_price != 0:
+        parts.append(f"{unit_price:,.0f}")
+    if pax is not None and pax != 0:
+        parts.append(f"x {int(pax)} pax")
+    if quantity is not None and quantity not in (0, 1, None):
+        parts.append(f"x {int(quantity)}")
+    if parts:
+        return " ".join(parts) + f" = {amount:,.0f}"
+    if amount:
+        return f"{amount:,.0f}"
+    return ""
+
+
+def _apply_code_group_overrides(grouped: dict, overrides: dict) -> dict:
+    """Re-key the grouped dict when the user has changed tour codes.
+
+    overrides: { original_group_key: new_tour_code }
+    Only applies when the new code is non-empty and different from the original.
+    """
+    from collections import OrderedDict
+    new_grouped = OrderedDict()
+    for key, items in grouped.items():
+        new_code = overrides.get(key, "").strip()
+        if new_code and new_code != key:
+            new_grouped[new_code] = items
+        else:
+            new_grouped[key] = items
+    return new_grouped
 
 
 def start_expense_job(
@@ -68,6 +443,8 @@ def start_expense_job(
     session_id: str = "default",
     website_username: str = None,
     website_password: str = None,
+    company_name: str = "",
+    expense_type: str = "",
 ) -> dict:
     """
     Start the expense recording workflow.
@@ -128,27 +505,38 @@ def start_expense_job(
         currency_note = f"\nCurrency: **{detected_currency}** ({currency_evidence})"
 
     # Group records by tour_code for multi-line form submissions
-    grouped = _group_records_by_tour(records)
+    type_label = {"flight": "Air Ticket", "land_tour": "Tour Fare",
+                  "insurance": "Insurance", "misc": "Misc"}.get(expense_type, "")
+    if expense_type:
+        logger.info("Expense type selected: %s (%s)", expense_type, type_label)
+
+    grouped = _group_records_by_tour(records, expense_type=expense_type)
 
     grand_total = sum(r.get("amount", 0) for r in records)
     primary_currency = detected_currency or records[0].get("currency", "THB")
 
     group_lines = []
     for tc, items in grouped.items():
+        display_tc = tc.split("__item")[0] if "__item" in tc else tc
         subtotal = sum(r.get("amount", 0) for r in items)
-        item_labels = ", ".join(r.get("description", "?")[:20] for r in items)
+        item_types = []
+        for r in items:
+            label = r.get("expense_label") or CHARGE_TYPE_LABELS.get(r.get("charge_type", "other"), r.get("charge_type", "?"))
+            amt = r.get("amount", 0)
+            item_types.append(f"{label} ({amt:,.0f})")
+        items_str = " + ".join(item_types)
         group_lines.append(
-            f"- `{tc}`: {len(items)} item{'s' if len(items) > 1 else ''} "
-            f"= **{subtotal:,.0f} {primary_currency}** ({item_labels})"
+            f"- `{display_tc}`: {items_str} = **{subtotal:,.0f} {primary_currency}** → 1 expense order"
         )
     group_summary = "\n".join(group_lines)
 
+    type_note = f"\nType: **{type_label}**" if type_label else ""
     _emit_timed(emit_fn, job_start, "Document Parser",
-                f"**Step 2/7:** Extracted **{len(records)}** expense line items "
-                f"across **{len(grouped)}** tour groups.{currency_note}\n"
+                f"**Step 2/7:** Extracted **{len(records)}** line items "
+                f"→ grouped into **{len(grouped)}** expense order{'s' if len(grouped) > 1 else ''}.{currency_note}{type_note}\n"
                 f"**Grand Total: {grand_total:,.0f} {primary_currency}**\n"
                 f"{group_summary}\n"
-                f"Fields classified: {_describe_fields(records[0])}")
+                f"Fields: {_describe_fields(records[0])}")
 
     # Save parsed data
     os.makedirs(Config.DATA_DIR, exist_ok=True)
@@ -165,7 +553,120 @@ def start_expense_job(
             session_id=session_id,
             website_username=website_username,
             website_password=website_password,
+            company_name=company_name,
+            expense_type=expense_type,
         )
+
+
+def start_manual_expense_job(
+    params: dict,
+    emit_fn: Optional[Callable] = None,
+    session_id: str = "default",
+    website_username: str = None,
+    website_password: str = None,
+    company_name: str = "",
+    expense_type: str = "",
+) -> dict:
+    """
+    Start the expense recording workflow from manually typed chat parameters
+    (no file upload needed).
+
+    params should contain at minimum: tour_code.
+    Optional: amount, unit_price, pax, currency, charge_type, expense_label,
+              supplier_name, travel_date, program_code, description.
+    """
+    tour_code = params.get("tour_code", "").strip()
+    if not tour_code:
+        return {
+            "content": "I need a **tour/group code** to create an expense. "
+                       "Please provide it (e.g., `BTNRTXJ260313W02`).",
+            "data": None,
+        }
+
+    job_id = str(uuid.uuid4())[:8]
+    job_start = datetime.now()
+    _jobs[job_id] = {
+        "id": job_id,
+        "status": "started",
+        "source": "manual_entry",
+        "started_at": job_start.isoformat(),
+        "steps": [],
+        "results": [],
+    }
+
+    _emit(emit_fn, "agent_status", {
+        "agent": "Accounting Agent",
+        "status": "working",
+        "message": "Processing manual expense entry...",
+    })
+
+    pax = params.get("pax")
+    unit_price = params.get("unit_price")
+    amount = params.get("amount")
+
+    if pax is not None:
+        try:
+            pax = int(float(pax))
+        except (ValueError, TypeError):
+            pax = None
+    if unit_price is not None:
+        try:
+            unit_price = float(unit_price)
+        except (ValueError, TypeError):
+            unit_price = None
+    if amount is not None:
+        try:
+            amount = float(amount)
+        except (ValueError, TypeError):
+            amount = None
+
+    if not amount and unit_price and pax:
+        amount = unit_price * pax
+
+    if not amount:
+        return {
+            "content": "I need the **amount** (or unit_price x pax) to create this expense. "
+                       "Please provide the numbers.",
+            "data": None,
+        }
+
+    currency = params.get("currency", "THB") or "THB"
+    charge_type = params.get("charge_type", "other") or "other"
+    expense_label = params.get("expense_label") or CHARGE_TYPE_LABELS.get(charge_type, charge_type)
+
+    record = {
+        "tour_code": tour_code,
+        "program_code": params.get("program_code", ""),
+        "travel_date": params.get("travel_date", ""),
+        "pax": pax,
+        "unit_price": unit_price,
+        "amount": amount,
+        "currency": currency,
+        "charge_type": charge_type,
+        "expense_label": expense_label,
+        "supplier_name": params.get("supplier_name", ""),
+        "description": params.get("description", expense_label),
+        "exchange_rate": params.get("exchange_rate", 1.0),
+    }
+
+    if not company_name:
+        company_name = params.get("company_name", "")
+
+    grouped = {tour_code: [record]}
+
+    _emit_timed(emit_fn, job_start, "Accounting Agent",
+                f"**Manual entry:** `{tour_code}` -- {expense_label}: "
+                f"**{amount:,.0f} {currency}**"
+                + (f" ({pax} pax x {unit_price:,.0f})" if pax and unit_price else ""))
+
+    return _run_direct(
+        job_id, grouped, emit_fn,
+        session_id=session_id,
+        website_username=website_username,
+        website_password=website_password,
+        company_name=company_name,
+        expense_type=expense_type,
+    )
 
 
 def _run_via_n8n(job_id: str, records: list, emit_fn) -> dict:
@@ -206,6 +707,8 @@ def _run_direct(
     session_id: str = "default",
     website_username: str = None,
     website_password: str = None,
+    company_name: str = "",
+    expense_type: str = "",
 ) -> dict:
     """Execute browser automation directly (no n8n).
 
@@ -261,6 +764,8 @@ def _run_direct(
         session_id=session_id,
         website_username=website_username,
         website_password=website_password,
+        company_name=company_name,
+        expense_type=expense_type,
     )
 
     def _worker():
@@ -302,6 +807,8 @@ async def _run_direct_async(
     session_id: str = "default",
     website_username: str = None,
     website_password: str = None,
+    company_name: str = "",
+    expense_type: str = "",
 ) -> dict:
     """Async implementation of the direct expense automation flow.
 
@@ -322,6 +829,8 @@ async def _run_direct_async(
             session_id=session_id,
             website_username=website_username,
             website_password=website_password,
+            company_name=company_name,
+            expense_type=expense_type,
         )
     finally:
         BrowserManager.release(session_id)
@@ -330,6 +839,7 @@ async def _run_direct_async(
 async def _run_direct_async_inner(
     job_id, grouped_records, emit_fn, job_start,
     session_id="default", website_username=None, website_password=None,
+    company_name="", expense_type="",
 ):
     _emit_timed(emit_fn, job_start, "Accounting Agent", "Logging in...")
     login_result = await browser_tools.login(
@@ -352,8 +862,10 @@ async def _run_direct_async_inner(
     success_count = 0
     fail_count = 0
 
-    for i, (tour_code, line_items) in enumerate(grouped_records.items(), 1):
+    for i, (group_key, line_items) in enumerate(grouped_records.items(), 1):
         record_start = datetime.now()
+        # For split-mode keys like "GO1TAO5N...260314__item0", use the real tour code
+        tour_code = group_key.split("__item")[0] if "__item" in group_key else group_key
         n_items = len(line_items)
         item_types = ", ".join(r.get("charge_type", "?") for r in line_items)
         currency = line_items[0].get("currency", "THB")
@@ -373,6 +885,8 @@ async def _run_direct_async_inner(
                     session_id=session_id,
                     website_username=website_username,
                     website_password=website_password,
+                    company_name=company_name,
+                    expense_type=expense_type,
                 ),
                 timeout=timeout_secs,
             )
@@ -507,23 +1021,25 @@ PAYMENT_TYPE_MAP = {
     "service_fee": "ค่าทัวร์/ค่าแลนด์",
     "guide_tip": "เบี้ยเลี้ยง (ค่าจ้างมัคคุเทศก์และหัวหน้าทัวร์)",
     "transport": "ค่าใช้จ่ายเบ็ดเตล็ด",
-    "insurance": "ค่าทัวร์/ค่าแลนด์",
+    "insurance": "ค่าประกันภัย",
     "entrance_fee": "ค่าทัวร์/ค่าแลนด์",
-    "other": "ค่าทัวร์/ค่าแลนด์",
+    "commission": "ค่าคอมมิชชั่น",
+    "other": "ค่าใช้จ่ายเบ็ดเตล็ด",
 }
 
 CHARGE_TYPE_LABELS = {
-    "flight": "Flight",
+    "flight": "Airline Ticket",
     "land_tour": "Tour Fare",
-    "single_supplement": "Single Supplement",
+    "single_supplement": "Single Room Supplement",
     "service_fee": "Service Fee",
-    "guide_tip": "Guide/Tips",
-    "visa": "Visa",
+    "guide_tip": "Guide Fee / Tips",
+    "visa": "Visa Fee",
     "accommodation": "Accommodation",
     "meal": "Meals",
     "transport": "Transport",
     "insurance": "Insurance",
     "entrance_fee": "Entrance Fee",
+    "commission": "Commission",
     "other": "Other",
 }
 
@@ -533,6 +1049,8 @@ async def _process_tour_group(
     session_id: str = "default",
     website_username: str = None,
     website_password: str = None,
+    company_name: str = "",
+    expense_type: str = "",
 ) -> dict:
     """Process a tour group (one or more line items) through a single form submission."""
     _job_start = job_start or datetime.now()
@@ -544,7 +1062,10 @@ async def _process_tour_group(
     supplier_name_raw = first.get("supplier_name", "")
     travel_date = first.get("travel_date", "")
     program_code = first.get("program_code", "")
-    company_name = first.get("company_name", "") or "2U CENTER"
+    # company_name comes from the user's message (e.g., "Go365Travel");
+    # fall back to record-level value or empty.
+    if not company_name:
+        company_name = first.get("company_name", "")
     currency = first.get("currency", "THB")
     exchange_rate = first.get("exchange_rate", 1.0)
 
@@ -553,6 +1074,21 @@ async def _process_tour_group(
     # ── Step A: Clean supplier name (keep original, filter generic terms) ──
     supplier_name = translate_supplier_name(supplier_name_raw)
     logger.info("Supplier name: raw='%s' -> final='%s', company='%s'", supplier_name_raw, supplier_name, company_name)
+
+    # If supplier name is missing from the document, ask the user
+    if not supplier_name:
+        _progress("supplier name not found in document, asking user...")
+        user_answer = _ask_user(
+            emit_fn, session_id,
+            f"I couldn't find the supplier/pay-to name in the document for tour `{tour_code}`.\n"
+            f"Please type the **supplier name** (ชื่อ/บริษัทที่สั่งจ่าย):",
+            timeout=180,
+        )
+        if user_answer:
+            supplier_name = user_answer.strip()
+            _progress(f"supplier set to: **{supplier_name}**")
+        else:
+            _progress("no supplier name provided, leaving blank")
 
     # ── Step B: Extract departure date from tour code ──
     depart_date = browser_tools.extract_date_from_tour_code(tour_code)
@@ -579,18 +1115,38 @@ async def _process_tour_group(
     # Build expense rows for multi-line form filling
     rows_for_form = []
     rows_description_parts = []
+    formatted_desc_lines = []
+
     for item in line_items:
         desc = item.get("description", "")
         ct = item.get("charge_type", "other")
         amt = item.get("amount", 0)
         pax = item.get("pax")
         up = item.get("unit_price")
+        qty = item.get("quantity")
+        calc_note = item.get("calculation_note")
 
         if not up and amt and pax:
             up = round(amt / pax)
 
-        label = CHARGE_TYPE_LABELS.get(ct, ct)
-        rows_description_parts.append(f"{label}: {amt:,.0f} {currency}")
+        expense_label = item.get("expense_label") or CHARGE_TYPE_LABELS.get(ct, ct)
+
+        rows_description_parts.append(f"{expense_label}: {amt:,.0f} {currency}")
+
+        item_desc = _format_expense_description(
+            expense_label=expense_label,
+            travel_date=item.get("travel_date", travel_date),
+            travel_date_start=item.get("travel_date_start"),
+            travel_date_end=item.get("travel_date_end"),
+            pax=pax,
+            unit_price=up,
+            quantity=qty,
+            amount=amt,
+            currency=currency,
+            tour_code=tour_code,
+            calculation_note=calc_note,
+        )
+        formatted_desc_lines.append(item_desc)
 
         rows_for_form.append({
             "description": desc,
@@ -600,20 +1156,25 @@ async def _process_tour_group(
             "exchange_rate": exchange_rate,
             "pax": pax,
             "unit_price": up,
+            "expense_label": expense_label,
+            "formatted_description": item_desc,
         })
 
     rows_description = " | ".join(rows_description_parts)
 
-    # Build remark
+    # Build the structured remark: Supplier, Company, Code Group, expenses, total
     remark_parts = []
     if supplier_name:
-        remark_parts.append(supplier_name)
+        remark_parts.append(f"Supplier: {supplier_name}")
+    if company_name:
+        remark_parts.append(f"Company: {company_name}")
     remark_parts.append(f"Code group: {tour_code}")
     if travel_date:
         remark_parts.append(f"Date: {travel_date}")
-    for item in line_items:
-        label = CHARGE_TYPE_LABELS.get(item.get("charge_type", ""), item.get("charge_type", ""))
-        remark_parts.append(f"{label}: {item.get('amount', 0):,.0f} {currency}")
+    remark_parts.append("")
+    remark_parts.append("\n\n".join(formatted_desc_lines))
+    remark_parts.append("")
+    remark_parts.append(f"***Total: {total_amount:,.0f} {currency}")
     remark = "\n".join(remark_parts)
 
     if rows_for_form:
@@ -670,14 +1231,35 @@ async def _process_tour_group(
         if add_btn["status"] != "success":
             logger.warning("Could not open company expense section: %s", add_btn.get("message"))
 
-        # Determine primary charge type for company expense section
-        primary_charge_type = line_items[0].get("charge_type", "other")
+        # Determine primary charge type for company expense section.
+        # If expense_type was selected by the user, use it for the
+        # payment_type dropdown; otherwise fall back to the first item's type.
+        EXPENSE_TYPE_TO_CHARGE = {
+            "flight": "flight",
+            "land_tour": "land_tour",
+            "insurance": "insurance",
+            "misc": "other",
+        }
+        primary_charge_type = (
+            EXPENSE_TYPE_TO_CHARGE.get(expense_type)
+            or line_items[0].get("charge_type", "other")
+        )
 
+        # Build a structured company remark: Supplier, Company, Code Group, expenses, total
         company_remark_parts = []
+        if supplier_name:
+            company_remark_parts.append(f"Supplier: {supplier_name}")
+        if company_name:
+            company_remark_parts.append(f"Company: {company_name}")
         if tour_code:
-            company_remark_parts.append(tour_code)
+            company_remark_parts.append(f"Code group: {tour_code}")
         if program_code:
-            company_remark_parts.append(program_code)
+            company_remark_parts.append(f"Program: {program_code}")
+        company_remark_parts.append("")
+        company_remark_parts.append("\n\n".join(formatted_desc_lines))
+        company_remark_parts.append("")
+        company_remark_parts.append(f"***Total: {total_amount:,.0f} {currency}")
+        company_remark = "\n".join(company_remark_parts)
 
         _progress("filling company expense section...")
         comp_fill = await browser_tools.fill_company_expense(
@@ -688,7 +1270,7 @@ async def _process_tour_group(
             payment_date=payment_date,
             payment_type=PAYMENT_TYPE_MAP.get(primary_charge_type, "ค่าทัวร์/ค่าแลนด์"),
             period=tour_code,
-            remark=" / ".join(company_remark_parts),
+            remark=company_remark,
             session_id=session_id,
         )
         if comp_fill["status"] != "success":
@@ -703,6 +1285,37 @@ async def _process_tour_group(
         # Extract the expense number
         _progress("extracting order number...")
         ext = await browser_tools.extract_order_number(session_id=session_id)
+        expense_number = ext.get("expense_number", "UNKNOWN")
+
+        # Navigate to the manage page to finalize company & supplier
+        _progress("navigating to expense manage page...")
+        try:
+            manage_nav = await asyncio.wait_for(
+                browser_tools.navigate_to_manage_page(session_id=session_id),
+                timeout=30,
+            )
+            if manage_nav["status"] == "success":
+                _progress(f"on manage page (expense {manage_nav.get('expense_id', '')}), "
+                           f"selecting company and filling supplier...")
+                manage_fill = await asyncio.wait_for(
+                    browser_tools.fill_manage_page_details(
+                        company_name=company_name,
+                        supplier_name=supplier_name,
+                        session_id=session_id,
+                    ),
+                    timeout=30,
+                )
+                if manage_fill["status"] == "success":
+                    _progress("manage page updated successfully")
+                else:
+                    logger.warning("Manage page fill issue: %s", manage_fill.get("message"))
+                    _progress(f"manage page: {manage_fill.get('message', 'partial')}")
+            else:
+                logger.warning("Could not navigate to manage page: %s", manage_nav.get("message"))
+                _progress("manage page link not found (expense still created)")
+        except (asyncio.TimeoutError, Exception) as manage_err:
+            logger.warning("Manage page step timed out or failed: %s (expense still created)", manage_err)
+            _progress("manage page step skipped (expense still created)")
 
         return {
             "tour_code": tour_code,
@@ -714,7 +1327,7 @@ async def _process_tour_group(
             "rows_description": rows_description,
             "depart_date": depart_date,
             "status": "success",
-            "expense_number": ext.get("expense_number", "UNKNOWN"),
+            "expense_number": expense_number,
             "timestamp": datetime.now().isoformat(),
         }
 
@@ -749,6 +1362,132 @@ async def _process_tour_group(
             "error": str(e),
             "timestamp": datetime.now().isoformat(),
         }
+
+
+def _format_expense_description(
+    expense_label: str,
+    travel_date: str = None,
+    travel_date_start: str = None,
+    travel_date_end: str = None,
+    pax: int = None,
+    unit_price: float = None,
+    quantity: int = None,
+    amount: float = 0,
+    currency: str = "THB",
+    tour_code: str = None,
+    calculation_note: str = None,
+) -> str:
+    """
+    Build a human-readable expense description block.
+
+    Output format:
+        Payment = Airline Ticket
+        Date : 04-09 Mar 2026
+        Pax = 21
+        Price = 6,200 THB
+        Total = 21 x 6,200 = 130,200 THB
+    """
+    lines = []
+    lines.append(f"Payment = {expense_label}")
+
+    date_str = _format_travel_date(travel_date, travel_date_start, travel_date_end, tour_code=tour_code)
+    if date_str:
+        lines.append(f"Date : {date_str}")
+
+    if pax:
+        lines.append(f"Pax = {pax}")
+
+    if unit_price:
+        lines.append(f"Price = {unit_price:,.0f} {currency}")
+
+    if calculation_note:
+        lines.append(f"Total = {calculation_note} {currency}")
+    elif pax and unit_price and quantity and quantity > 1:
+        lines.append(f"Total = {unit_price:,.0f} x {pax} pax x {quantity} = {amount:,.0f} {currency}")
+    elif pax and unit_price:
+        lines.append(f"Total = {pax} x {unit_price:,.0f} = {amount:,.0f} {currency}")
+    elif amount:
+        lines.append(f"Total = {amount:,.0f} {currency}")
+
+    return "\n".join(lines)
+
+
+def _format_travel_date(
+    travel_date: str = None,
+    travel_date_start: str = None,
+    travel_date_end: str = None,
+    tour_code: str = None,
+) -> str:
+    """
+    Format travel dates into a human-readable string like '04-09 Mar 2026'.
+
+    Priority:
+    1. Structured start/end dates (dd/mm/yyyy)
+    2. Raw travel_date in mmdd-mmdd format (e.g., "0304-0309")
+    3. Raw travel_date as-is
+    """
+    MONTHS = {
+        1: "Jan", 2: "Feb", 3: "Mar", 4: "Apr", 5: "May", 6: "Jun",
+        7: "Jul", 8: "Aug", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dec",
+    }
+
+    # Strategy 1: structured start/end dates
+    if travel_date_start and travel_date_end:
+        try:
+            start = datetime.strptime(travel_date_start, "%d/%m/%Y")
+            end = datetime.strptime(travel_date_end, "%d/%m/%Y")
+            if start.month == end.month and start.year == end.year:
+                return f"{start.day:02d}-{end.day:02d} {MONTHS[start.month]} {start.year}"
+            else:
+                return (
+                    f"{start.day:02d} {MONTHS[start.month]} - "
+                    f"{end.day:02d} {MONTHS[end.month]} {end.year}"
+                )
+        except (ValueError, KeyError):
+            pass
+
+    if travel_date_start:
+        try:
+            start = datetime.strptime(travel_date_start, "%d/%m/%Y")
+            return f"{start.day:02d} {MONTHS[start.month]} {start.year}"
+        except (ValueError, KeyError):
+            pass
+
+    # Strategy 2: parse mmdd-mmdd format (e.g., "0304-0309")
+    if travel_date:
+        mmdd_match = re.match(r'^(\d{4})-(\d{4})$', travel_date.strip())
+        if mmdd_match:
+            raw_start, raw_end = mmdd_match.group(1), mmdd_match.group(2)
+            try:
+                sm, sd = int(raw_start[:2]), int(raw_start[2:])
+                em, ed = int(raw_end[:2]), int(raw_end[2:])
+                if 1 <= sm <= 12 and 1 <= sd <= 31 and 1 <= em <= 12 and 1 <= ed <= 31:
+                    year = _extract_year_from_tour_code(tour_code)
+                    year_str = f" {year}" if year else ""
+                    if sm == em:
+                        return f"{sd:02d}-{ed:02d} {MONTHS[sm]}{year_str}"
+                    else:
+                        return f"{sd:02d} {MONTHS[sm]} - {ed:02d} {MONTHS[em]}{year_str}"
+            except (ValueError, KeyError):
+                pass
+
+    return travel_date or ""
+
+
+def _extract_year_from_tour_code(tour_code: str) -> int | None:
+    """Extract the year from a tour code's embedded yymmdd date."""
+    if not tour_code or len(tour_code) < 6:
+        return None
+    stripped = tour_code.strip().rstrip("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
+    if len(stripped) < 6:
+        return None
+    tail = stripped[-6:]
+    if tail.isdigit():
+        yy = int(tail[:2])
+        mm = int(tail[2:4])
+        if 1 <= mm <= 12 and 20 <= yy <= 40:
+            return 2000 + yy
+    return None
 
 
 def _build_date_range(depart_date_str: str | None) -> tuple[str, str]:
@@ -865,21 +1604,93 @@ def _emit_timed(emit_fn, job_start: datetime, agent: str, message: str):
     })
 
 
-def _group_records_by_tour(records: list) -> dict:
-    """Group parsed records by tour_code.
+def _group_records_by_tour(records: list, expense_type: str = "") -> dict:
+    """Smart grouping of parsed records into expense orders.
 
-    When an invoice has multiple line items for the same tour group
-    (e.g. tour fare, single supplement, tips), they share the same
-    tour_code and should be submitted as multiple expense rows in a
-    single form.
+    Grouping behavior depends on `expense_type`:
+    - "land_tour" (Tour fare): Combine all items with the same tour code
+      into ONE expense form (tour fare + supplement + guide tip + add-on).
+    - "flight" / "insurance" / "misc": Each line item becomes its OWN
+      separate expense order, even if they share a tour code.
+    - "" (empty / unset): Falls back to "land_tour" behaviour (combine
+      by tour code) for backwards compatibility.
 
-    Returns: { tour_code: [record, ...], ... }  (preserving order)
+    Returns: { canonical_tour_code: [record, ...], ... }
     """
     from collections import OrderedDict
-    grouped: dict[str, list] = OrderedDict()
+
+    # ── Split mode: each record = its own expense order ──
+    split_types = {"flight", "insurance", "misc"}
+    if expense_type in split_types:
+        grouped: dict[str, list] = OrderedDict()
+        for i, rec in enumerate(records):
+            tc = rec.get("tour_code", "UNKNOWN")
+            key = f"{tc}__item{i}" if tc in grouped or any(
+                k.startswith(tc) for k in grouped
+            ) else tc
+            # Use a unique key per record to prevent merging
+            unique_key = f"{tc}__item{i}"
+            grouped[unique_key] = [rec]
+
+        logger.info(
+            "Split grouping (expense_type=%s): %d records → %d separate orders",
+            expense_type, len(records), len(grouped),
+        )
+        return grouped
+
+    # ── Combine mode (land_tour / default): group by normalized tour code ──
+    def _normalize_tour_code(tc: str) -> str:
+        tc = tc.strip().upper()
+        if tc and tc[-1].isalpha() and len(tc) > 6:
+            base = tc.rstrip("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+            if len(base) >= 6 and base[-1].isdigit():
+                return base
+        return tc
+
+    norm_to_canonical: dict[str, str] = {}
+    grouped = OrderedDict()
+
     for rec in records:
-        tc = rec.get("tour_code", "UNKNOWN")
-        grouped.setdefault(tc, []).append(rec)
+        tc_raw = rec.get("tour_code", "UNKNOWN")
+        tc_norm = _normalize_tour_code(tc_raw)
+
+        if tc_norm in norm_to_canonical:
+            canonical = norm_to_canonical[tc_norm]
+        else:
+            canonical = tc_raw
+            norm_to_canonical[tc_norm] = canonical
+
+        grouped.setdefault(canonical, []).append(rec)
+
+    # Pass 2: merge groups that share the same program_code
+    pc_to_group: dict[str, str] = {}
+    merge_map: dict[str, str] = {}
+
+    for canonical, items in grouped.items():
+        for item in items:
+            pc = (item.get("program_code") or "").strip().upper()
+            if not pc:
+                continue
+            if pc in pc_to_group and pc_to_group[pc] != canonical:
+                merge_map[canonical] = pc_to_group[pc]
+            else:
+                pc_to_group[pc] = canonical
+
+    if merge_map:
+        merged: dict[str, list] = OrderedDict()
+        for canonical, items in grouped.items():
+            target = merge_map.get(canonical, canonical)
+            merged.setdefault(target, []).extend(items)
+        grouped = merged
+
+    if len(grouped) < len(records):
+        for tc, items in grouped.items():
+            types = ", ".join(i.get("charge_type", "?") for i in items)
+            logger.info(
+                "Grouped %d line items under '%s': [%s]",
+                len(items), tc, types,
+            )
+
     return grouped
 
 

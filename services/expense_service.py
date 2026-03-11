@@ -878,7 +878,7 @@ async def _run_direct_async_inner(
 
         try:
             import asyncio as _aio
-            timeout_secs = 120 + (n_items * 30)
+            timeout_secs = 180 + (n_items * 30)
             entry_result = await _aio.wait_for(
                 _process_tour_group(
                     tour_code, line_items, emit_fn, job_start,

@@ -34,8 +34,9 @@ def create_app():
         app,
         cors_allowed_origins="*",
         async_mode="eventlet",
-        ping_timeout=120,
+        ping_timeout=300,
         ping_interval=25,
+        max_http_buffer_size=10 * 1024 * 1024,  # 10 MB message limit
     )
 
     from app import websocket  # noqa: F401

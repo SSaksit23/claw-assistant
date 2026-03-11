@@ -30,7 +30,7 @@ function initSocket() {
         reconnectionAttempts: Infinity,
         reconnectionDelay: 1000,
         reconnectionDelayMax: 10000,
-        timeout: 120000,
+        timeout: 300000,
     });
 
     socket.on('connect', () => {
